@@ -15,7 +15,6 @@ static const char *const TAG = "blackview_lock";
 static const uint16_t BLACKVIEW_WRITE_HANDLE = 14;
 static esp_bd_addr_t blackview_addr = {0xFC, 0x61, 0x79, 0xCF, 0x0A, 0x98};
 
-// The full class definition must come before it is used.
 class BlackviewLock : public PollingComponent {
  public:
   esp_gatt_if_t gattc_if;
@@ -35,9 +34,6 @@ class BlackviewLock : public PollingComponent {
   void send_hello_packet(esp_gatt_if_t gattc_if, uint16_t conn_id);
 };
 
-// --- Global instance and callback functions ---
-// This section has been corrected and correctly placed after the class definition.
-
 static BlackviewLock *global_blackview_lock = nullptr;
 
 static void global_gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) {
@@ -54,11 +50,23 @@ static void global_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_c
 void BlackviewLock::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Blackview Lock component...");
   global_blackview_lock = this;
+  
+  ESP_LOGD(TAG, "Setup Step 1: Registering GATTC App...");
+  esp_ble_gattc_app_register(0);
+  delay(200);
+
+  ESP_LOGD(TAG, "Setup Step 2: Releasing classic BT memory...");
   esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+  delay(200);
+
+  ESP_LOGD(TAG, "Setup Step 3: Registering callbacks...");
   esp_ble_gattc_register_callback(global_gattc_event_handler);
   esp_ble_gap_register_callback(global_gap_event_handler);
-  esp_ble_gattc_app_register(0);
-  this->start_scan(); // Start scanning immediately on boot
+  delay(200);
+
+  ESP_LOGD(TAG, "Setup Step 4: Starting initial scan...");
+  this->start_scan();
+  ESP_LOGD(TAG, "Setup complete and running.");
 }
 
 void BlackviewLock::update() {
