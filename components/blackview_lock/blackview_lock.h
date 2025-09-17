@@ -12,13 +12,12 @@ using namespace esphome::esp32_ble_client;
 
 static const uint16_t BLACKVIEW_WRITE_HANDLE = 14;
 
-// Corrected: Removed redundant "Component" inheritance
 class BlackviewLock : public BLEClientBase {
  public:
-  // Corrected: Return type is now "bool" instead of "void"
   bool gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) override {
     if (event == ESP_GATTC_OPEN_EVT) {
-      if (param->open.status == ESP_GATTT_OK) { // Note: Corrected typo from ESP_GATT_OK to ESP_GATTT_OK based on common ESP-IDF definitions. If this fails, change it back.
+      // Corrected the typo back to ESP_GATT_OK
+      if (param->open.status == ESP_GATT_OK) {
         ESP_LOGI("blackview_lock", "Connected! Immediately sending Hello packet...");
         send_hello_packet(gattc_if, param->open.conn_id);
       } else {
@@ -39,7 +38,6 @@ class BlackviewLock : public BLEClientBase {
                param->notify.value_len, format_hex_pretty(param->notify.value, param->notify.value_len).c_str());
     }
     
-    // Corrected: Added a return statement
     return false;
   }
 
