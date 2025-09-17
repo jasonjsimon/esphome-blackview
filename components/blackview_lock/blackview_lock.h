@@ -15,7 +15,19 @@ static const char *const TAG = "blackview_lock";
 static const uint16_t BLACKVIEW_WRITE_HANDLE = 14;
 static esp_bd_addr_t blackview_addr = {0xFC, 0x61, 0x79, 0xCF, 0x0A, 0x98};
 
-// The full class definition now comes BEFORE the global functions that use it.
+class BlackviewLock;
+static BlackviewLock *global_blackview_lock = nullptr;
+
+static void global_gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) {
+  if (global_blackview_lock != nullptr)
+    global_blackview_lock->gattc_event_handler(event, gattc_if, param);
+}
+
+static void global_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  if (global_blackview_lock != nullptr)
+    global_blackview_lock->gap_event_handler(event, param);
+}
+
 class BlackviewLock : public PollingComponent {
  public:
   esp_gatt_if_t gattc_if;
@@ -35,18 +47,7 @@ class BlackviewLock : public PollingComponent {
   void send_hello_packet(esp_gatt_if_t gattc_if, uint16_t conn_id);
 };
 
-// --- Global instance and callback functions ---
 static BlackviewLock *global_blackview_lock = nullptr;
-
-static void global_gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) {
-  if (global_blackview_lock != nullptr)
-    global_blackview_lock->gattc_event_handler(event, gattc_if, param);
-}
-
-static void global_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-  if (global_blackview_lock != nullptr)
-    global_blackview_lock->gap_event_handler(event, param);
-}
 
 // --- Method Implementations ---
 void BlackviewLock::setup() {
@@ -56,6 +57,8 @@ void BlackviewLock::setup() {
   esp_ble_gattc_register_callback(global_gattc_event_handler);
   esp_ble_gap_register_callback(global_gap_event_handler);
   esp_ble_gattc_app_register(0);
+  // This new line will start the scan immediately on boot
+  this->start_scan();
 }
 
 void BlackviewLock::update() {
