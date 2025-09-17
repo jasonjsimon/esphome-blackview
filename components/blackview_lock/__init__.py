@@ -17,4 +17,5 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     parent = await cg.get_variable(config["ble_client_id"])
-    cg.add(parent.register_node(var))
+    # Corrected: Using the function name suggested by the compiler
+    cg.add(parent.register_ble_node(var))
