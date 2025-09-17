@@ -13,10 +13,8 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Required("ble_client_id"): cv.use_id(esp32_ble_client.BLEClientBase),
 }).extend(cv.COMPONENT_SCHEMA)
 
+# Reverting to the simpler, more robust helper function for code generation
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
-    
-    parent = await cg.get_variable(config["ble_client_id"])
-    # This function name has been corrected as per the compiler's suggestion
-    cg.add(parent.register_ble_node(var))
+    await esp32_ble_client.register_ble_node(var, config)
