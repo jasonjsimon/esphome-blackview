@@ -3,7 +3,6 @@ import esphome.config_validation as cv
 from esphome.components import ble_client, text_sensor, binary_sensor, sensor
 from esphome.const import CONF_ID
 
-# Add the 3 sensor deps here:
 DEPENDENCIES = ["ble_client", "binary_sensor", "text_sensor", "sensor"]
 
 blackview_lock_ns = cg.esphome_ns.namespace("blackview_lock")
@@ -14,6 +13,11 @@ CONF_BLE_CLIENT_ID = "ble_client_id"
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(BlackviewLock),
     cv.Required(CONF_BLE_CLIENT_ID): cv.use_id(ble_client.BLEClient),
+
+    cv.Optional("fallback_write_handle", default=0): cv.hex_uint16_t,
+    cv.Optional("fallback_notify_handle", default=0): cv.hex_uint16_t,
+    cv.Optional("fallback_cccd_handle",   default=0): cv.hex_uint16_t,
+    cv.Optional("prefer_write_no_rsp",    default=True): cv.boolean,
 
     cv.Optional("session_key"): text_sensor.text_sensor_schema(),
     cv.Optional("last_notify"): text_sensor.text_sensor_schema(),
@@ -28,23 +32,23 @@ async def to_code(config):
     parent = await cg.get_variable(config[CONF_BLE_CLIENT_ID])
     cg.add(parent.register_ble_node(var))
 
+    cg.add(var.set_fallback_write_handle(config["fallback_write_handle"]))
+    cg.add(var.set_fallback_notify_handle(config["fallback_notify_handle"]))
+    cg.add(var.set_fallback_cccd_handle(config["fallback_cccd_handle"]))
+    cg.add(var.set_prefer_write_no_rsp(config["prefer_write_no_rsp"]))
+
     if "session_key" in config:
         ts = await text_sensor.new_text_sensor(config["session_key"])
         cg.add(var.set_session_key_text_sensor(ts))
-
     if "last_notify" in config:
         ts = await text_sensor.new_text_sensor(config["last_notify"])
         cg.add(var.set_last_notify_text_sensor(ts))
-
     if "key_received" in config:
         bs = await binary_sensor.new_binary_sensor(config["key_received"])
         cg.add(var.set_key_received_binary_sensor(bs))
-
     if "connected" in config:
         bs = await binary_sensor.new_binary_sensor(config["connected"])
         cg.add(var.set_connected_binary_sensor(bs))
-
     if "notify_count" in config:
         s = await sensor.new_sensor(config["notify_count"])
         cg.add(var.set_notify_count_sensor(s))
-
