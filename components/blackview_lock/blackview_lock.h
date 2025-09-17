@@ -42,6 +42,7 @@ class BlackviewLock : public Component, public BLEClientNode {
 
   void send_hello_packet(esp_gatt_if_t gattc_if, uint16_t conn_id) {
     uint64_t random_c = ((uint64_t) esp_random() << 32) | esp_random();
+    // Corrected: std.vector -> std::vector
     std::vector<uint8_t> payload;
     for (int i = 0; i < 8; i++) {
       payload.push_back((random_c >> (8 * i)) & 0xFF);
@@ -59,8 +60,9 @@ class BlackviewLock : public Component, public BLEClientNode {
         else crc <<= 1;
       }
     }
-
-    std.vector<uint8_t> packet;
+    
+    // Corrected: std.vector -> std::vector
+    std::vector<uint8_t> packet;
     packet.push_back(0x55);
     packet.push_back(0xAA);
     packet.push_back(0xAA);
