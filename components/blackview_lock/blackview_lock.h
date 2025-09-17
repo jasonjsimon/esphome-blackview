@@ -113,17 +113,15 @@ class BlackviewLock : public Component, public BLEClientNode {
         break;
       }
 
-      case ESP_GATTC_SEARCH_CMP_EVT:  // some IDF versions use *_CMP_ vs *_CMPL_ – handle both
       case ESP_GATTC_SEARCH_CMPL_EVT: {
-        if ((event == ESP_GATTC_SEARCH_CMPL_EVT && param->search_cmpl.status == ESP_GATT_OK) ||
-            (event == ESP_GATTC_SEARCH_CMP_EVT)) {
+        if (param->search_cmpl.status == ESP_GATT_OK) {
           ESP_LOGI(TAG, "Service discovery complete; resolving handles...");
           this->resolve_handles_and_subscribe_();
           // After CCCD, do one re-poke (don’t spam)
           if (write_handle_ != 0 && !got_key_) {
             delay_hello_after_cccd_ = true;
           }
-        } else if (event == ESP_GATTC_SEARCH_CMPL_EVT) {
+        } else {
           ESP_LOGW(TAG, "SEARCH_CMPL status=%d", param->search_cmpl.status);
         }
         break;
@@ -351,3 +349,4 @@ class BlackviewLock : public Component, public BLEClientNode {
 
 }  // namespace blackview_lock
 }  // namespace esphome
+
