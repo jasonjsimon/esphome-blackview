@@ -3,10 +3,10 @@ import esphome.config_validation as cv
 from esphome.components import ble_client
 from esphome.const import CONF_ID
 
-DEPENDENCIES = ['ble_client']
+DEPENDENCIES = ["ble_client"]
 
-blackview_lock_ns = cg.esphome_ns.namespace('blackview_lock')
-BlackviewLock = blackview_lock_ns.class_('BlackviewLock', cg.Component, ble_client.BLEClientNode)
+blackview_lock_ns = cg.esphome_ns.namespace("blackview_lock")
+BlackviewLock = blackview_lock_ns.class_("BlackviewLock", cg.Component, ble_client.BLEClientNode)
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(BlackviewLock),
