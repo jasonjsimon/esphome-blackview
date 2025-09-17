@@ -1,8 +1,7 @@
 #pragma once
 
 #include "esphome.h"
-// This is the include path that works.
-#include "esphome/components/esp32_ble_client/ble_client_base.h"
+#include "esphome/components/ble_client/ble_client.h"
 
 #ifdef USE_ESP32
 
@@ -11,18 +10,17 @@
 namespace esphome {
 namespace blackview_lock {
 
-using namespace esphome::esp32_ble_client;
+using namespace esphome::ble_client;
 
 static const uint16_t BLACKVIEW_WRITE_HANDLE = 14;
 
-// This is the class name the compiler requires.
 class BlackviewLock : public Component, public BLEClientNode {
  public:
-  bool gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) override {
+  void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) override {
     if (event == ESP_GATTC_OPEN_EVT) {
       if (param->open.status == ESP_GATT_OK) {
         ESP_LOGI("blackview_lock", "Connected! Immediately sending Hello packet...");
-        send_hello_packet(this->parent_->get_gattc_if(), this->parent_->get_conn_id());
+        send_hello_packet(gattc_if, param->open.conn_id);
       } else {
         ESP_LOGW("blackview_lock", "Connection failed, status=%d", param->open.status);
       }
@@ -40,8 +38,6 @@ class BlackviewLock : public Component, public BLEClientNode {
       ESP_LOGI("blackview_lock", "SUCCESS! Key data received (%d bytes): %s",
                param->notify.value_len, format_hex_pretty(param->notify.value, param->notify.value_len).c_str());
     }
-    
-    return false;
   }
 
   void send_hello_packet(esp_gatt_if_t gattc_if, uint16_t conn_id) {
@@ -64,7 +60,7 @@ class BlackviewLock : public Component, public BLEClientNode {
       }
     }
 
-    std::vector<uint8_t> packet;
+    std.vector<uint8_t> packet;
     packet.push_back(0x55);
     packet.push_back(0xAA);
     packet.push_back(0xAA);
