@@ -3,7 +3,8 @@ import esphome.config_validation as cv
 from esphome.components import ble_client, text_sensor, binary_sensor, sensor
 from esphome.const import CONF_ID
 
-DEPENDENCIES = ["ble_client"]
+# Add the 3 sensor deps here:
+DEPENDENCIES = ["ble_client", "binary_sensor", "text_sensor", "sensor"]
 
 blackview_lock_ns = cg.esphome_ns.namespace("blackview_lock")
 BlackviewLock = blackview_lock_ns.class_("BlackviewLock", cg.Component, ble_client.BLEClientNode)
@@ -46,3 +47,4 @@ async def to_code(config):
     if "notify_count" in config:
         s = await sensor.new_sensor(config["notify_count"])
         cg.add(var.set_notify_count_sensor(s))
+
