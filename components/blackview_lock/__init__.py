@@ -10,7 +10,6 @@ BlackviewLock = blackview_lock_ns.class_('BlackviewLock', cg.Component, esp32_bl
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(BlackviewLock),
-    # This now uses the class name suggested by a previous error message.
     cv.Required("ble_client_id"): cv.use_id(esp32_ble_client.BLEClientBase),
 }).extend(cv.COMPONENT_SCHEMA)
 
@@ -19,4 +18,5 @@ async def to_code(config):
     await cg.register_component(var, config)
     
     parent = await cg.get_variable(config["ble_client_id"])
-    cg.add(parent.register_node(var))
+    # This function name has been corrected as per the compiler's suggestion
+    cg.add(parent.register_ble_node(var))
