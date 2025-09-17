@@ -1,22 +1,24 @@
 #pragma once
 
 #include "esphome.h"
-#include "esphome/components/esp32_ble_client/ble_client_base.h"
+// This path needs to point to the correct header for BLEClientNode
+#include "esphome/components/esp32_ble_client/esp32_ble_client.h"
 
 #ifdef USE_ESP32
 
 #include <esp_gattc_api.h>
 
 namespace esphome {
-// All of our code now lives inside the "blackview_lock" namespace
 namespace blackview_lock {
 
 using namespace esphome::esp32_ble_client;
 
 static const uint16_t BLACKVIEW_WRITE_HANDLE = 14;
 
-class BlackviewLock : public BLEClientBase {
+// Corrected: Inherit from BLEClientNode as required by the compiler
+class BlackviewLock : public Component, public BLEClientNode {
  public:
+  // Corrected: Return type is bool to match the base class function
   bool gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) override {
     if (event == ESP_GATTC_OPEN_EVT) {
       if (param->open.status == ESP_GATT_OK) {
@@ -37,7 +39,7 @@ class BlackviewLock : public BLEClientBase {
     
     if (event == ESP_GATTC_NOTIFY_EVT) {
       ESP_LOGI("blackview_lock", "SUCCESS! Key data received (%d bytes): %s",
-               param->notify.value_len, format_hex_pretty(param->notify.value, param->notify.value_len).c_str());
+               param->notify.value_len, format_hex_pretty(param->notify.value, param->notify.value_len).c_tr());
     }
     
     return false;
