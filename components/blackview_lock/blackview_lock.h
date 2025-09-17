@@ -15,10 +15,12 @@ class BlackviewLock : public Component, public BLEClientNode {
   void set_notify_count_sensor(Sensor *s) { notify_count_ = s; }
 
   // NEW: config setters
-  void set_fallback_write_handle(uint16_t h)  { fb_write_  = h; }
-  void set_fallback_notify_handle(uint16_t h) { fb_notify_ = h; }
-  void set_fallback_cccd_handle(uint16_t h)   { fb_cccd_   = h; }
-  void set_prefer_write_no_rsp(bool v)        { prefer_no_rsp_ = v; }
+  void set_fallback_write_handle(uint16_t h) { fallback_write_handle_ = h; }
+  void set_fallback_notify_handle(uint16_t h) { fallback_notify_handle_ = h; }
+  void set_fallback_cccd_handle(uint16_t h) { fallback_cccd_handle_ = h; }
+  void set_prefer_write_no_rsp(bool v) { prefer_write_no_rsp_ = v; }
+  void set_write_uuid(const std::string &s) { write_uuid_ = s; }
+  void set_notify_uuid(const std::string &s) { notify_uuid_ = s; }
 
   // ... setup(), dump_config(), request_handshake(), loop() unchanged ...
 
@@ -81,6 +83,12 @@ class BlackviewLock : public Component, public BLEClientNode {
   // NEW: fallback handles + flag
   uint16_t fb_write_ = 0, fb_notify_ = 0, fb_cccd_ = 0;
   bool prefer_no_rsp_ = true;
+  uint16_t fallback_write_handle_{0};
+  uint16_t fallback_notify_handle_{0};
+  uint16_t fallback_cccd_handle_{0};
+  bool prefer_write_no_rsp_{false};
+  std::string write_uuid_{"00002b11-0000-1000-8000-00805f9b34fb"};
+  std::string notify_uuid_{"00002b10-0000-1000-8000-00805f9b34fb"};
 
   // state...
   bool got_key_ = false;
@@ -112,3 +120,4 @@ class BlackviewLock : public Component, public BLEClientNode {
     payload.push_back(0x00); payload.push_back(0x00);
   }
   static void append_crc_xmodem_le_(std::vector<uint8_t> &buf,_
+
