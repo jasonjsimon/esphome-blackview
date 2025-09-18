@@ -28,7 +28,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   void set_connected_binary_sensor(binary_sensor::BinarySensor *b) { connected_ = b; }
   void set_notify_count_sensor(sensor::Sensor *s) { notify_count_ = s; }
 
-  // Back-compat no-ops so you don't need to edit YAML / main.cpp
+  // Back-compat no-ops so you don’t need to edit YAML / main.cpp
   void set_prefer_write_no_rsp(bool) {}
   void set_write_uuid(const char *) {}
   void set_notify_uuid(const char *) {}
@@ -57,7 +57,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         have_bda_ = true;
         if (connected_) connected_->publish_state(true);
         ESP_LOGI(TAG, "Connected.");
-        // IMPORTANT: Do NOT force encryption here; some locks reject and disconnect.
+        // Do not force link encryption here.
         break;
       }
       case ESP_GATTC_SEARCH_CMPL_EVT: {
@@ -65,14 +65,16 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         this->resolve_handles_();
         // Try indications first; if it fails we fall back to notifications.
         this->enable_notify_(gattc_if, param->search_cmpl.conn_id, /*use_indications=*/true);
-        // We’ll send HELLO after descriptor write OK (or fallback path).
+        // We now defer HELLO slightly until loop() sees post_cccd_hello_due_ms_.
         break;
       }
       case ESP_GATTC_WRITE_DESCR_EVT: {
         if (param->write.status == ESP_GATT_OK) {
           ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", param->write.handle);
-          // Send initial HELLO once CCCD set.
-          this->send_hello_(gattc_if, param->write.conn_id, /*prefer_write_no_rsp=*/false, "auto");
+          // Defer HELLO ~120ms after CCCD success to avoid immediate controller back-to-back writes.
+          post_cccd_hello_due_ms_ = millis() + post_cccd_delay_ms_;
+          pending_conn_id_ = param->write.conn_id;
+          pending_gattc_if_ = gattc_if;
         } else {
           ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", param->write.handle, param->write.status);
           // Fallback: indications -> notifications
@@ -81,7 +83,9 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
             this->enable_notify_(gattc_if, param->write.conn_id, /*use_indications=*/false);
           } else {
             // If even notifications fail, attempt HELLO anyway (some firmwares still accept writes).
-            this->send_hello_(gattc_if, param->write.conn_id, /*prefer_write_no_rsp=*/false, "auto-no-cccd");
+            post_cccd_hello_due_ms_ = millis() + post_cccd_delay_ms_;
+            pending_conn_id_ = param->write.conn_id;
+            pending_gattc_if_ = gattc_if;
           }
         }
         break;
@@ -111,6 +115,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         connected_flag_ = false;
         if (connected_) connected_->publish_state(false);
         ESP_LOGD(TAG, "Disconnected, reason 0x%X", param->disconnect.reason);
+        // Clear any pending HELLO
+        post_cccd_hello_due_ms_ = 0;
         break;
       }
       default:
@@ -120,13 +126,20 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void loop() override {
     const uint32_t now = millis();
+
+    // Send the deferred HELLO once the small post-CCCD delay has elapsed.
+    if (connected_flag_ && post_cccd_hello_due_ms_ && now >= post_cccd_hello_due_ms_) {
+      post_cccd_hello_due_ms_ = 0;
+      this->send_hello_(pending_gattc_if_, pending_conn_id_, /*prefer_write_no_rsp=*/true, "auto-v1");
+    }
+
     if (connected_flag_ && (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
       last_hello_ms_ = now;
       ble_client::BLEClient *p = this->parent();
       if (!p) return;
       const uint16_t conn_id = p->get_conn_id();
       const esp_gatt_if_t gi = static_cast<esp_gatt_if_t>(p->get_gattc_if());
-      this->send_hello_(gi, conn_id, /*prefer_write_no_rsp=*/false, wants_handshake_ ? "manual" : "auto");
+      this->send_hello_(gi, conn_id, /*prefer_write_no_rsp=*/true, wants_handshake_ ? "manual" : "auto");
       wants_handshake_ = false;
     }
   }
@@ -146,7 +159,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
                                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
   }
 
-  void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id, bool /*prefer_write_no_rsp*/, const char *why) {
+  void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id, bool prefer_write_no_rsp, const char *why) {
     if (!write_handle_) return;
 
     // Alternate the 16B and 18B frames to cover both firmware variants.
@@ -166,7 +179,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       buf[15] = crc & 0xFF;
       ESP_LOGD(TAG, "[%s-v1] HELLO v1 to handle 0x%04X (16 bytes)", why, write_handle_);
       esp_ble_gattc_write_char(gattc_if, conn_id, write_handle_, sizeof(buf), buf,
-                               ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+                               prefer_write_no_rsp ? ESP_GATT_WRITE_TYPE_NO_RSP : ESP_GATT_WRITE_TYPE_RSP,
+                               ESP_GATT_AUTH_REQ_NONE);
     } else {
       // 18-byte frame
       uint8_t buf[18];
@@ -180,7 +194,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       buf[17] = crc & 0xFF;
       ESP_LOGD(TAG, "[%s] HELLO v0 to handle 0x%04X (18 bytes)", why, write_handle_);
       esp_ble_gattc_write_char(gattc_if, conn_id, write_handle_, sizeof(buf), buf,
-                               ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+                               prefer_write_no_rsp ? ESP_GATT_WRITE_TYPE_NO_RSP : ESP_GATT_WRITE_TYPE_RSP,
+                               ESP_GATT_AUTH_REQ_NONE);
     }
   }
 
@@ -213,6 +228,12 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   uint32_t last_hello_ms_{0};
   const uint32_t hello_interval_ms_{8000};
   bool toggle_v1_{true};
+
+  // Post-CCCD deferred HELLO
+  uint32_t post_cccd_hello_due_ms_{0};
+  static constexpr uint32_t post_cccd_delay_ms_{120};
+  uint16_t pending_conn_id_{0};
+  esp_gatt_if_t pending_gattc_if_{0};
 
   // Handles
   uint16_t write_handle_{0};
