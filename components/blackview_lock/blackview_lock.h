@@ -50,7 +50,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   // ----- Component lifecycle -----
   void setup() override {
     // Requesting Legacy Bonding
-    esp_ble_auth_req_t auth_req = ESP_BLE_AUTH_REQ_BOND; // Corrected typo
+    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND; // Corrected typo
     
     uint8_t key_size = 16;
     esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
@@ -111,7 +111,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         hello_attempts_ = 0;
         notify_registered_ = false;
         encryption_requested_ = false;
-        encryption_request_due_ms_ = millis() + 700;  // small delay before asking for encryption
+        encryption_request_due_ms_ = millis() + 700;
 
         if (connected_bin_ != nullptr)
           connected_bin_->publish_state(true);
@@ -131,7 +131,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         ESP_LOGI(TAG, "Service discovery complete");
         resolve_handles_();
 
-        // Ask the stack to route NOTIFYs for our handle; ESPHome's layer will write CCCD=0x0001 (notifications)
         if (have_bda_) {
           esp_err_t r = esp_ble_gattc_register_for_notify(gattc_if, remote_bda_, notify_handle_);
           ESP_LOGD(TAG, "register_for_notify returned %d", (int) r);
@@ -153,11 +152,9 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       }
 
       case ESP_GATTC_WRITE_DESCR_EVT: {
-        // CCCD write completes (done by the stack after register_for_notify)
         if (param->write.handle == cccd_handle_) {
           if (param->write.status == ESP_GATT_OK) {
             ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", cccd_handle_);
-            // Give peer a bit to arm notifications, then send HELLO
             post_cccd_hello_due_ms_ = millis() + post_cccd_delay_ms_;
           } else {
             ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", cccd_handle_,
@@ -231,9 +228,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   // ----- Helpers -----
   void resolve_handles_() {
     // Fixed from traces:
-    //   write  = 0x0009
-    //   notify = 0x000B
-    //   CCCD   = 0x000C
     write_handle_ = 0x0009;
     notify_handle_ = 0x000B;
     cccd_handle_ = 0x000C;
@@ -257,7 +251,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     ESP_LOGD(TAG, "[auto] Sending real HELLO to handle 0x%04X (%u bytes)", write_handle_, (unsigned) len);
 
     esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), write_handle_, len,
-                                           (uint8_t *) real_hello_payload, ESP_GATT_WRITE_TYPE_NO_RSP, // Corrected typo
+                                           (uint8_t *) real_hello_payload, ESP_GATT_WRITE_TYPE_NO_RSP,
                                            ESP_GATT_AUTH_REQ_NO_MITM);
     if (r == ESP_OK) {
       hello_attempts_++;
