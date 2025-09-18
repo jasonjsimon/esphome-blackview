@@ -57,13 +57,12 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void loop() override {
     const uint32_t now = millis();
-    // Only send after CCCD is enabled, and give the server ~400ms to settle.
     const bool post_cccd_settle = (cccd_enabled_ms_ == 0) || (now - cccd_enabled_ms_ >= 400);
     if (connected_flag_ && notify_enabled_ && post_cccd_settle &&
         (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
       auto *p = this->parent();
       if (p != nullptr) {
-        send_hello_(p->get_gattc_if(), p->get_conn_id(), "auto");
+        send_hello_(p->get_gattc_if(), p->get_conn_id(), "auto-v1");
       }
     }
   }
@@ -94,8 +93,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         if (param->write.handle == cccd_handle_ && param->write.status == ESP_GATT_OK) {
           ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", param->write.handle);
           notify_enabled_ = true;
-          cccd_enabled_ms_ = millis();  // start settle timer
-          wants_handshake_ = true;      // arm first HELLO (loop will gate by settle delay)
+          cccd_enabled_ms_ = millis();
+          wants_handshake_ = true;  // loop will send after settle delay
         } else {
           ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", param->write.handle, (int) param->write.status);
         }
@@ -111,7 +110,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         notify_counter_++;
         if (notify_count_) notify_count_->publish_state(static_cast<float>(notify_counter_));
 
-        // Hex dump of last notify (cap 32 bytes)
+        // Hex dump (cap 32 bytes)
         char hex[2 * 32 + 1] = {0};
         size_t n = std::min<size_t>(param->notify.value_len, 32);
         for (size_t i = 0; i < n; i++) std::sprintf(hex + 2 * i, "%02X", param->notify.value[i]);
@@ -153,13 +152,13 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void enable_notify_(esp_gatt_if_t gattc_if, uint16_t conn_id) {
     if (!cccd_handle_) return;
-    const uint8_t en[2] = {0x01, 0x00};
+    const uint8_t en[2] = {0x01, 0x00};  // notifications
     esp_ble_gattc_write_char_descr(gattc_if, conn_id, cccd_handle_, sizeof(en), (uint8_t *)en,
                                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
   }
 
-  // Build & write HELLO (18 bytes total):
-  //   Header [A5 E5] + Length [00 0C] + Payload(12) + CRC16(payload) LE
+  // Build & write HELLO v1 (18 bytes total):
+  //   Header [A5 E5] + Length [00 0E] + Payload(12) + CRC16(payload) **big-endian**
   void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id, const char *label) {
     if (!write_handle_ || gattc_if == ESP_GATT_IF_NONE) return;
 
@@ -185,14 +184,15 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
     uint8_t msg[18];
     msg[0] = 0xA5; msg[1] = 0xE5;
-    msg[2] = 0x00; msg[3] = 0x0C;  // length = 12 (payload only)
+    msg[2] = 0x00; msg[3] = 0x0E;  // *** change: include CRC in length (14) ***
     std::memcpy(&msg[4], payload, sizeof(payload));
-    msg[16] = (uint8_t)(crc & 0xFF);
-    msg[17] = (uint8_t)((crc >> 8) & 0xFF);
+    // *** change: CRC big-endian (MSB first) ***
+    msg[16] = (uint8_t)((crc >> 8) & 0xFF);
+    msg[17] = (uint8_t)(crc & 0xFF);
 
-    ESP_LOGD(TAG, "[%s] HELLO v0 to handle 0x%04X (18 bytes)", label ? label : "?", write_handle_);
+    ESP_LOGD(TAG, "[%s] HELLO v1 to handle 0x%04X (18 bytes)", label ? label : "?", write_handle_);
 
-    // *** Change: use NO_RSP for HELLO to match some locks' expectations ***
+    // Keep NO_RSP to avoid some locks dropping on request/response timing
     esp_err_t err = esp_ble_gattc_write_char(
         gattc_if, conn_id, write_handle_, sizeof(msg), msg,
         ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
@@ -205,7 +205,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     wants_handshake_ = false;
   }
 
-  // Handles (from your discovery)
   void resolve_handles_() {
     write_handle_  = 0x0009;
     notify_handle_ = 0x000B;
