@@ -57,7 +57,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void loop() override {
     const uint32_t now = millis();
-    const bool post_cccd_settle = (cccd_enabled_ms_ == 0) || (now - cccd_enabled_ms_ >= 400);
+    // CHANGED: settle delay from 400ms -> 1200ms
+    const bool post_cccd_settle = (cccd_enabled_ms_ == 0) || (now - cccd_enabled_ms_ >= 1200);
     if (connected_flag_ && notify_enabled_ && post_cccd_settle &&
         (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
       auto *p = this->parent();
@@ -128,6 +129,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         notify_enabled_ = false;
         cccd_enabled_ms_ = 0;
         if (connected_) connected_->publish_state(false);
+        ESP_LOGD(TAG, "Disconnected, reason 0x%02X", param->disconnect.reason);
         break;
       }
 
@@ -152,13 +154,14 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void enable_notify_(esp_gatt_if_t gattc_if, uint16_t conn_id) {
     if (!cccd_handle_) return;
-    const uint8_t en[2] = {0x01, 0x00};  // notifications
+    // CHANGED: enable INDICATIONS (0x0002) instead of NOTIFICATIONS (0x0001)
+    const uint8_t en[2] = {0x02, 0x00};
     esp_ble_gattc_write_char_descr(gattc_if, conn_id, cccd_handle_, sizeof(en), (uint8_t *)en,
                                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
   }
 
   // Build & write HELLO v1 (18 bytes total):
-  //   Header [A5 E5] + Length [00 0E] + Payload(12) + CRC16(payload) **big-endian**
+  //   Header [A5 E5] + Length [00 0E] + Payload(12) + CRC16(payload) big-endian
   void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id, const char *label) {
     if (!write_handle_ || gattc_if == ESP_GATT_IF_NONE) return;
 
@@ -184,15 +187,14 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
     uint8_t msg[18];
     msg[0] = 0xA5; msg[1] = 0xE5;
-    msg[2] = 0x00; msg[3] = 0x0E;  // *** change: include CRC in length (14) ***
+    msg[2] = 0x00; msg[3] = 0x0E;  // length includes CRC (14 = 12+2)
     std::memcpy(&msg[4], payload, sizeof(payload));
-    // *** change: CRC big-endian (MSB first) ***
-    msg[16] = (uint8_t)((crc >> 8) & 0xFF);
+    msg[16] = (uint8_t)((crc >> 8) & 0xFF);  // big-endian
     msg[17] = (uint8_t)(crc & 0xFF);
 
     ESP_LOGD(TAG, "[%s] HELLO v1 to handle 0x%04X (18 bytes)", label ? label : "?", write_handle_);
 
-    // Keep NO_RSP to avoid some locks dropping on request/response timing
+    // Keep NO_RSP for now; if this still fails we'll try WRITE_TYPE_RSP next
     esp_err_t err = esp_ble_gattc_write_char(
         gattc_if, conn_id, write_handle_, sizeof(msg), msg,
         ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
