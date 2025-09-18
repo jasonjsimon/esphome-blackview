@@ -243,41 +243,32 @@ void setup() override {
     ESP_LOGI(TAG, "CCCD handle 0x%04X; stack will enable notifications…", cccd_handle_);
   }
 
-  void send_hello_(int version /* 1 or 0 */) {
-    auto *cli = this->parent();
-    if (cli == nullptr) return;
+  // --- REPLACE the old send_hello_ function with this one ---
 
-    // NOTE: placeholder payloads. Real lock likely needs proper bytes and/or encryption.
-    uint8_t payload[18] = {0};
-    uint16_t len = 0;
+void send_hello_() {
+  auto *cli = this->parent();
+  if (cli == nullptr) return;
 
-    if (version == 1) {
-      const uint8_t v1[16] = {0x48, 0x45, 0x4C, 0x4C, 0x4F, 0x31, 0x00, 0x00,
-                              0xAA, 0x55, 0xAA, 0x55, 0x10, 0x00, 0x00, 0x00};
-      std::memcpy(payload, v1, sizeof(v1));
-      len = sizeof(v1);
-      ESP_LOGD(TAG, "[auto] HELLO v1 to handle 0x%04X (%u bytes)", write_handle_, (unsigned) len);
-    } else {
-      const uint8_t v0[18] = {0x48, 0x45, 0x4C, 0x4C, 0x4F, 0x30, 0x00, 0x00,
-                              0xAA, 0x55, 0xAA, 0x55, 0x12, 0x00, 0x00, 0x00,
-                              0x00, 0x00};
-      std::memcpy(payload, v0, sizeof(v0));
-      len = sizeof(v0);
-      ESP_LOGD(TAG, "[auto] HELLO v0 to handle 0x%04X (%u bytes)", write_handle_, (unsigned) len);
-    }
+  // The real "HELLO" payload captured from the BTSnoop log (Packet 1635)
+  const uint8_t real_hello_payload[] = {
+      0xA5, 0xE5, 0x00, 0x0C, 0x03, 0x04, 0x00, 0x00,
+      0x00, 0x01, 0x14, 0xB7, 0x80, 0x03, 0xF5, 0x7A
+  };
 
-    // Ask for no-MITM if needed; otherwise plain. The stack will upgrade if required by the peer.
-    esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), write_handle_,
-                                           len, payload,
-                                           ESP_GATT_WRITE_TYPE_RSP,
-                                           ESP_GATT_AUTH_REQ_NO_MITM);
-    if (r == ESP_OK) {
-      hello_attempts_++;
-    } else {
-      ESP_LOGW(TAG, "HELLO write error %d", (int) r);
-    }
+  uint16_t len = sizeof(real_hello_payload);
+
+  ESP_LOGD(TAG, "[auto] Sending real HELLO to handle 0x%04X (%u bytes)", write_handle_, (unsigned) len);
+
+  esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), write_handle_,
+                                         len, (uint8_t*)real_hello_payload,
+                                         ESP_GATT_WRITE_TYPE_RSP,
+                                         ESP_GATT_AUTH_REQ_NO_MITM);
+  if (r == ESP_OK) {
+    hello_attempts_++;
+  } else {
+    ESP_LOGW(TAG, "HELLO write error %d", (int) r);
   }
-
+}
   // ----- Members -----
   uint16_t write_handle_{0x0009};
   uint16_t notify_handle_{0x000B};
@@ -319,4 +310,5 @@ void setup() override {
 
 }  // namespace blackview_lock
 }  // namespace esphome
+
 
