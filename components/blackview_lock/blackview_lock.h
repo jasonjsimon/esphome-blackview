@@ -19,7 +19,7 @@ static const char *const TAG = "blackview_lock";
 
 /**
  * Blackview SE-series lock GATT client node.
- * Flow: CONNECT → DISCOVERY → register_for_notify (stack writes CCCD) → delay → HELLO (v1, fallback v0) → expect NOTIFY.
+ * Flow: CONNECT → DISCOVERY → register_for_notify (stack writes CCCD) → delay → HELLO → expect NOTIFY.
  */
 class BlackviewLock : public Component, public ble_client::BLEClientNode {
  public:
@@ -36,34 +36,32 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   // ----- Public actions wired from YAML -----
   void request_handshake() {
-    ESP_LOGD(TAG, "request_handshake(): start HELLO sequence");
+    ESP_LOGD(TAG, "request_handshake(): manually sending HELLO");
     hello_attempts_ = 0;
-    current_hello_version_ = 1;  // try v1 first
-    send_hello_(current_hello_version_);
+    send_hello_();
     hello_retry_due_ms_ = millis() + hello_retry_interval_ms_;
   }
   void request_handshake_mode(int mode) {
-    current_hello_version_ = (mode == 2) ? 0 : 1;  // mode 2 = v0-first
-    ESP_LOGD(TAG, "request_handshake_mode(%d): trying v%d first", mode, (int) current_hello_version_);
+    ESP_LOGD(TAG, "request_handshake_mode(%d): manually sending HELLO", mode);
     hello_attempts_ = 0;
-    send_hello_(current_hello_version_);
+    send_hello_();
     hello_retry_due_ms_ = millis() + hello_retry_interval_ms_;
   }
 
   // ----- Component lifecycle -----
-void setup() override {
-  esp_ble_auth_req_t auth_req = (esp_ble_auth_req_t)(ESP_LE_AUTH_BOND | ESP_LE_AUTH_REQ_SC_ONLY);
-  uint8_t key_size = 16;
-  esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
-  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-  uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  void setup() override {
+    esp_ble_auth_req_t auth_req = (esp_ble_auth_req_t)(ESP_LE_AUTH_BOND | ESP_LE_AUTH_REQ_SC_ONLY);
+    uint8_t key_size = 16;
+    esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
+    uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
 
-  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &resp_key, sizeof(resp_key));
-}
+    esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &resp_key, sizeof(resp_key));
+  }
 
   void dump_config() override {
     ESP_LOGCONFIG(TAG, "Blackview Lock");
@@ -86,21 +84,18 @@ void setup() override {
     if (post_cccd_hello_due_ms_ != 0 && now >= post_cccd_hello_due_ms_) {
       post_cccd_hello_due_ms_ = 0;
       hello_attempts_ = 0;
-      current_hello_version_ = 1;  // v1 first
-      send_hello_(current_hello_version_);
+      send_hello_();
       hello_retry_due_ms_ = now + hello_retry_interval_ms_;
     }
 
-    // In the loop() function, around line 94
     if (hello_retry_due_ms_ != 0 && now >= hello_retry_due_ms_) {
-     if (hello_attempts_ >= hello_attempts_max_) {
-      ESP_LOGW(TAG, "No notify after %u HELLO attempts; pausing until next reconnect.", hello_attempts_);
-      hello_retry_due_ms_ = 0;
-     } else {
-       // No more version alternating, just retry the same one
-       send_hello_();
-       hello_retry_due_ms_ = now + hello_retry_interval_ms_;
-     }
+      if (hello_attempts_ >= hello_attempts_max_) {
+        ESP_LOGW(TAG, "No notify after %u HELLO attempts; pausing until next reconnect.", hello_attempts_);
+        hello_retry_due_ms_ = 0;
+      } else {
+        send_hello_();
+        hello_retry_due_ms_ = now + hello_retry_interval_ms_;
+      }
     }
   }
 
@@ -117,7 +112,8 @@ void setup() override {
         encryption_requested_ = false;
         encryption_request_due_ms_ = millis() + 700;  // small delay before asking for encryption
 
-        if (connected_bin_ != nullptr) connected_bin_->publish_state(true);
+        if (connected_bin_ != nullptr)
+          connected_bin_->publish_state(true);
         std::memcpy(remote_bda_, param->connect.remote_bda, sizeof(remote_bda_));
         have_bda_ = true;
 
@@ -165,8 +161,8 @@ void setup() override {
             post_cccd_hello_due_ms_ = millis() + post_cccd_delay_ms_;
           } else {
             // Common transient error (e.g., 128/133) — we don't second-guess the stack here; it will retry if needed.
-            ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)",
-                     cccd_handle_, (int) param->write.status);
+            ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", cccd_handle_,
+                     (int) param->write.status);
           }
         }
         break;
@@ -189,12 +185,15 @@ void setup() override {
         hello_attempts_ = 0;
 
         notify_seen_count_++;
-        if (notify_count_ != nullptr) notify_count_->publish_state((float) notify_seen_count_);
+        if (notify_count_ != nullptr)
+          notify_count_->publish_state((float) notify_seen_count_);
 
         char buf[64] = {0};
         size_t to_dump = len > 20 ? 20 : len, off = 0;
-        for (size_t i = 0; i < to_dump && (off + 3) < sizeof(buf); i++) off += snprintf(buf + off, sizeof(buf) - off, "%02X ", data[i]);
-        ESP_LOGD(TAG, "%s on handle 0x%04X len=%u first=%s", is_notify ? "NOTIFY" : "INDICATE", handle, (unsigned) len, buf);
+        for (size_t i = 0; i < to_dump && (off + 3) < sizeof(buf); i++)
+          off += snprintf(buf + off, sizeof(buf) - off, "%02X ", data[i]);
+        ESP_LOGD(TAG, "%s on handle 0x%04X len=%u first=%s", is_notify ? "NOTIFY" : "INDICATE", handle,
+                 (unsigned) len, buf);
 
         if (last_notify_text_ != nullptr) {
           std::string hex;
@@ -203,7 +202,8 @@ void setup() override {
           for (uint16_t i = 0; i < len; i++) {
             snprintf(b, sizeof(b), "%02X", data[i]);
             hex += b;
-            if (i + 1 != len) hex += " ";
+            if (i + 1 != len)
+              hex += " ";
           }
           last_notify_text_->publish_state(hex.c_str());
         }
@@ -218,7 +218,8 @@ void setup() override {
         notify_registered_ = false;
         encryption_requested_ = false;
         encryption_request_due_ms_ = 0;
-        if (connected_bin_ != nullptr) connected_bin_->publish_state(false);
+        if (connected_bin_ != nullptr)
+          connected_bin_->publish_state(false);
         ESP_LOGD(TAG, "Disconnected, reason 0x%X", (unsigned) param->disconnect.reason);
         break;
       }
@@ -244,32 +245,29 @@ void setup() override {
     ESP_LOGI(TAG, "CCCD handle 0x%04X; stack will enable notifications…", cccd_handle_);
   }
 
-  // --- REPLACE the old send_hello_ function with this one ---
+  void send_hello_() {
+    auto *cli = this->parent();
+    if (cli == nullptr)
+      return;
 
-void send_hello_() {
-  auto *cli = this->parent();
-  if (cli == nullptr) return;
+    // The real "HELLO" payload captured from the BTSnoop log (Packet 1635)
+    const uint8_t real_hello_payload[] = {0xA5, 0xE5, 0x00, 0x0C, 0x03, 0x04, 0x00, 0x00,
+                                          0x00, 0x01, 0x14, 0xB7, 0x80, 0x03, 0xF5, 0x7A};
 
-  // The real "HELLO" payload captured from the BTSnoop log (Packet 1635)
-  const uint8_t real_hello_payload[] = {
-      0xA5, 0xE5, 0x00, 0x0C, 0x03, 0x04, 0x00, 0x00,
-      0x00, 0x01, 0x14, 0xB7, 0x80, 0x03, 0xF5, 0x7A
-  };
+    uint16_t len = sizeof(real_hello_payload);
 
-  uint16_t len = sizeof(real_hello_payload);
+    ESP_LOGD(TAG, "[auto] Sending real HELLO to handle 0x%04X (%u bytes)", write_handle_, (unsigned) len);
 
-  ESP_LOGD(TAG, "[auto] Sending real HELLO to handle 0x%04X (%u bytes)", write_handle_, (unsigned) len);
-
-  esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), write_handle_,
-                                         len, (uint8_t*)real_hello_payload,
-                                         ESP_GATT_WRITE_TYPE_RSP,
-                                         ESP_GATT_AUTH_REQ_NO_MITM);
-  if (r == ESP_OK) {
-    hello_attempts_++;
-  } else {
-    ESP_LOGW(TAG, "HELLO write error %d", (int) r);
+    esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), write_handle_, len,
+                                           (uint8_t *) real_hello_payload, ESP_GATT_WRITE_TYPE_RSP,
+                                           ESP_GATT_AUTH_REQ_NO_MITM);
+    if (r == ESP_OK) {
+      hello_attempts_++;
+    } else {
+      ESP_LOGW(TAG, "HELLO write error %d", (int) r);
+    }
   }
-}
+
   // ----- Members -----
   uint16_t write_handle_{0x0009};
   uint16_t notify_handle_{0x000B};
@@ -283,11 +281,10 @@ void send_hello_() {
   // Timers/state
   uint32_t post_cccd_hello_due_ms_{0};
   uint32_t hello_retry_due_ms_{0};
-  uint8_t current_hello_version_{1};
   uint8_t hello_attempts_{0};
   uint8_t hello_attempts_max_{10};
-  const uint32_t post_cccd_delay_ms_{3000};      // was 1500
-  const uint32_t hello_retry_interval_ms_{1500}; // was 1000
+  const uint32_t post_cccd_delay_ms_{3000};
+  const uint32_t hello_retry_interval_ms_{1500};
 
   // Optional encryption nudge
   uint32_t encryption_request_due_ms_{0};
@@ -311,6 +308,3 @@ void send_hello_() {
 
 }  // namespace blackview_lock
 }  // namespace esphome
-
-
-
