@@ -192,39 +192,74 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     ESP_LOGD(TAG, "[%s] HELLO v0 to handle 0x%04X (18 bytes)", label, write_handle_);
   }
 
-  static uint16_t crc_xmodem_(const uint8_t *data, size_t len) {
-    uint16_t crc = 0x0000;
-    for (size_t i = 0; i < len; i++) {
-      crc ^= static_cast<uint16_t>(data[i]) << 8;
-      for (int b = 0; b < 8; b++) {
-        if (crc & 0x8000)
-          crc = (crc << 1) ^ 0x1021;
-        else
-          crc <<= 1;
+// CRC-16/XMODEM over 'data' (poly 0x1021, init 0x0000, no reflect, no xorout).
+static uint16_t crc16_xmodem_(const uint8_t *data, size_t len) {
+  uint16_t crc = 0x0000;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= (uint16_t)data[i] << 8;
+    for (int b = 0; b < 8; b++) {
+      if (crc & 0x8000) {
+        crc = (crc << 1) ^ 0x1021;
+      } else {
+        crc <<= 1;
       }
     }
-    return crc;
   }
+  return crc;
+}
 
-  // Entities
-  text_sensor::TextSensor *session_key_text_{nullptr};
-  text_sensor::TextSensor *last_notify_text_{nullptr};
-  binary_sensor::BinarySensor *key_received_{nullptr};
-  binary_sensor::BinarySensor *connected_{nullptr};
-  sensor::Sensor *notify_count_{nullptr};
+// Sends the "HELLO" exactly as the phone does: 16 bytes total.
+// Frame: [A5 E5] [00 0C] [payload(10) = 03 04 + 8-byte nonce] [CRC16-XMODEM LE of payload]
+void send_hello_on_(esp_gatt_if_t gattc_if, uint16_t conn_id,
+                    uint16_t handle, bool /*no_rsp_unused*/, const char *label) {
+  if (handle == 0 || gattc_if == ESP_GATT_IF_NONE) return;
 
-  // State
-  uint16_t write_handle_{0x0000};
-  uint16_t notify_handle_{0x0000};
-  uint16_t cccd_handle_{0x0000};
-  uint32_t notify_counter_{0};
-  uint32_t last_hello_ms_{0};
-  uint32_t hello_interval_ms_{8000};
-  bool wants_handshake_{false};
-  bool key_received_seen_{false};
-  bool connected_flag_{false};
-  int handshake_mode_{0};  // currently unused, reserved
-};
+  // Build 10-byte payload: 0x03,0x04 + 8-byte nonce.
+  uint8_t payload[10];
+  payload[0] = 0x03;
+  payload[1] = 0x04;
 
-}  // namespace blackview_lock
-}  // namespace esphome
+  // 8-byte nonce: any 64-bit value is fine; use two esp_random() calls.
+  // (We don’t need it to be time-based; the lock just expects a well-formed frame.)
+  uint32_t r1 = esp_random();
+  uint32_t r2 = esp_random();
+  // Little-endian nonce (matches how we see it in captures as raw bytes)
+  payload[2] = (uint8_t)(r1 & 0xFF);
+  payload[3] = (uint8_t)((r1 >> 8) & 0xFF);
+  payload[4] = (uint8_t)((r1 >> 16) & 0xFF);
+  payload[5] = (uint8_t)((r1 >> 24) & 0xFF);
+  payload[6] = (uint8_t)(r2 & 0xFF);
+  payload[7] = (uint8_t)((r2 >> 8) & 0xFF);
+  payload[8] = (uint8_t)((r2 >> 16) & 0xFF);
+  payload[9] = (uint8_t)((r2 >> 24) & 0xFF);
+
+  // CRC over the 10-byte payload:
+  uint16_t crc = crc16_xmodem_(payload, sizeof(payload));
+
+  // Assemble the 16-byte message
+  uint8_t msg[16];
+  // Magic A5 E5
+  msg[0] = 0xA5;
+  msg[1] = 0xE5;
+  // Length 0x000C (12) = payload(10) + CRC(2)
+  msg[2] = 0x00;
+  msg[3] = 0x0C;
+  // Copy payload
+  memcpy(&msg[4], payload, sizeof(payload));
+  // CRC16 little-endian appended inside that 12-byte section
+  msg[14] = (uint8_t)(crc & 0xFF);
+  msg[15] = (uint8_t)((crc >> 8) & 0xFF);
+
+  // Log what we’re sending (short)
+  ESP_LOGD(TAG, "[%s] HELLO v1 to handle 0x%04X (16 bytes)", label ? label : "?", handle);
+
+  // IMPORTANT: send with WRITE WITH RESPONSE for the initial hello.
+  esp_err_t err = esp_ble_gattc_write_char(gattc_if, conn_id, handle,
+                                           sizeof(msg), msg,
+                                           ESP_GATT_WRITE_TYPE_RSP,
+                                           ESP_GATT_AUTH_REQ_NONE);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "HELLO write failed: err=%d", (int)err);
+  }
+}
+
