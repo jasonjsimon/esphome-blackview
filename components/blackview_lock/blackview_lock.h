@@ -16,7 +16,7 @@ namespace blackview_lock {
 
 static const char *const TAG = "blackview_lock";
 
-// Normalize IDF enum spelling differences.
+// Normalize IDF enum spelling differences (CMP vs CMPL).
 #ifndef ESP_GATTC_SEARCH_CMPL_EVT
   #ifdef ESP_GATTC_SEARCH_CMP_EVT
     #define ESP_GATTC_SEARCH_CMPL_EVT ESP_GATTC_SEARCH_CMP_EVT
@@ -56,6 +56,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     switch (event) {
       case ESP_GATTC_OPEN_EVT: {
         if (param->open.status == ESP_GATT_OK) {
+          connected_flag_ = true;
           if (connected_) connected_->publish_state(true);
           ESP_LOGI(TAG, "Connected! Sending HELLO immediately...");
           this->send_hello_(gattc_if, param->open.conn_id, /*no_rsp*/ true, "fallback");
@@ -126,18 +127,25 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         break;
       }
 
+      case ESP_GATTC_CLOSE_EVT:
+      case ESP_GATTC_DISCONNECT_EVT: {
+        connected_flag_ = false;
+        if (connected_) connected_->publish_state(false);
+        ESP_LOGI(TAG, "Disconnected.");
+        break;
+      }
+
       default:
         break;
     }
-    // no return — signature is void
   }
 
   void loop() override {
     const uint32_t now = millis();
 
-    // Only send periodic HELLOs when the BLE client is connected
-    if (this->parent() && this->parent()->is_connected()
-        && (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
+    // Only send periodic HELLOs when we know we're connected
+    if (connected_flag_ && (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
+      // parent() is safe to use for IDs while connected
       this->send_hello_(this->parent()->get_gattc_if(),
                         this->parent()->get_conn_id(),
                         /*no_rsp*/ true,
@@ -214,7 +222,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   uint32_t hello_interval_ms_{8000};
   bool wants_handshake_{false};
   bool key_received_seen_{false};
-  int handshake_mode_[1]; // currently unused, reserved
+  bool connected_flag_{false};
+  int handshake_mode_{0};  // currently unused, reserved
 };
 
 }  // namespace blackview_lock
