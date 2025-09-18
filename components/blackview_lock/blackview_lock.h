@@ -17,13 +17,13 @@ namespace blackview_lock {
 static const char *const TAG = "blackview_lock";
 
 /**
- * Blackview SE60/SE series BLE lock “bridge” (GATT client node).
+ * Blackview SE60/SE-series BLE lock GATT client node.
  *
- * Connect → discover services → register_for_notify → write CCCD → send HELLO (v1, fallback v0) → expect NOTIFY.
+ * Flow: CONNECT → DISCOVERY → register_for_notify → write CCCD → send HELLO (v1, fallback v0) → expect NOTIFY/INDICATE.
  */
 class BlackviewLock : public Component, public ble_client::BLEClientNode {
  public:
-  // ===== YAML compatibility setters (no-ops or stored but unused) =====
+  // ===== YAML compatibility setters (stored/no-ops) =====
   void set_prefer_write_no_rsp(bool v) { this->prefer_write_no_rsp_ = v; }
   void set_write_uuid(const std::string &u) { this->write_uuid_ = u; }
   void set_notify_uuid(const std::string &u) { this->notify_uuid_ = u; }
@@ -33,6 +33,23 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   void set_key_received_binary_sensor(binary_sensor::BinarySensor *b) { this->key_received_ = b; }
   void set_connected_binary_sensor(binary_sensor::BinarySensor *b) { this->connected_bin_ = b; }
   void set_notify_count_sensor(sensor::Sensor *s) { this->notify_count_ = s; }
+
+  // ===== Public actions used by YAML lambdas =====
+  void request_handshake() {
+    ESP_LOGD(TAG, "request_handshake(): starting immediate HELLO sequence");
+    hello_attempts_ = 0;
+    current_hello_version_ = 1;  // try v1 first
+    send_hello_(current_hello_version_);
+    hello_retry_due_ms_ = millis() + hello_retry_interval_ms_;
+  }
+  void request_handshake_mode(int mode) {
+    // mode 1 = v1 first, mode 2 = v0 first (simple hint)
+    current_hello_version_ = (mode == 2) ? 0 : 1;
+    ESP_LOGD(TAG, "request_handshake_mode(%d): trying v%d first", mode, (int) current_hello_version_);
+    hello_attempts_ = 0;
+    send_hello_(current_hello_version_);
+    hello_retry_due_ms_ = millis() + hello_retry_interval_ms_;
+  }
 
   // ===== Component lifecycle =====
   void setup() override {}
@@ -47,20 +64,19 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   void loop() override {
     const uint32_t now = millis();
 
-    // After CCCD enable, send the first HELLO once the delay elapses
+    // First HELLO after CCCD enable
     if (post_cccd_hello_due_ms_ != 0 && now >= post_cccd_hello_due_ms_) {
       post_cccd_hello_due_ms_ = 0;
       hello_attempts_ = 0;
-      current_hello_version_ = 1;  // try v1 first
+      current_hello_version_ = 1;  // v1 first
       send_hello_(current_hello_version_);
-      // Schedule first retry window
       hello_retry_due_ms_ = now + hello_retry_interval_ms_;
     }
 
-    // If we haven't seen any notification, alternate HELLO v1/v0 with a cap
+    // Alternate HELLOs if no NOTIFY yet
     if (hello_retry_due_ms_ != 0 && now >= hello_retry_due_ms_) {
       if (hello_attempts_ >= hello_attempts_max_) {
-        ESP_LOGW(TAG, "No notify after %u HELLO attempts; pausing retries until next reconnect.", hello_attempts_);
+        ESP_LOGW(TAG, "No notify after %u HELLO attempts; pausing until next reconnect.", hello_attempts_);
         hello_retry_due_ms_ = 0;
       } else {
         current_hello_version_ ^= 1;  // flip between 1 and 0
@@ -99,16 +115,15 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         ESP_LOGI(TAG, "Service discovery complete");
         resolve_handles_();
 
-        // Step 1: register with the stack so NOTIFY events are delivered to us
+        // Step 1: register so NOTIFY events are delivered
         if (have_bda_) {
           esp_err_t r = esp_ble_gattc_register_for_notify(gattc_if, remote_bda_, notify_handle_);
           ESP_LOGD(TAG, "register_for_notify returned %d", (int) r);
           if (r != ESP_OK) {
-            // If registration fails immediately, still attempt to write the CCCD
+            // proceed to CCCD write anyway
             enable_notify_(gattc_if, param->search_cmpl.conn_id, /*use_indications=*/true);
           }
         } else {
-          // Shouldn't happen, but fall back to CCCD write
           enable_notify_(gattc_if, param->search_cmpl.conn_id, /*use_indications=*/true);
         }
         break;
@@ -123,8 +138,10 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
             ESP_LOGW(TAG, "REG_FOR_NOTIFY failed (status %d) for handle 0x%04X",
                      (int) param->reg_for_notify.status, notify_handle_);
           }
-          // Proceed to write CCCD (try indications first)
-          enable_notify_(gattc_if, param->reg_for_notify.conn_id, /*use_indications=*/true);
+          // Use conn_id from BLEClient wrapper (struct lacks conn_id here)
+          auto *cli = this->parent();
+          uint16_t conn_id = cli ? cli->get_conn_id() : 0;
+          enable_notify_(gattc_if, conn_id, /*use_indications=*/true);
         }
         break;
       }
@@ -134,20 +151,22 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         if (param->write.handle == cccd_handle_) {
           if (param->write.status == ESP_GATT_OK) {
             ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", cccd_handle_);
-            // Schedule first HELLO slightly after CCCD settles
+            // Schedule first HELLO shortly after CCCD settles
             post_cccd_hello_due_ms_ = millis() + post_cccd_delay_ms_;
           } else {
-            // 0x80/0x85/133 transient errors are common—retry with notifications if indications failed
+            // 0x80/133 and friends are common transient errors—flip indication/notification and retry
             ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)",
                      cccd_handle_, (int) param->write.status);
 
+            auto *cli = this->parent();
+            uint16_t conn_id = cli ? cli->get_conn_id() : param->write.conn_id;
+
             if (last_cccd_used_indications_) {
               last_cccd_used_indications_ = false;
-              enable_notify_(gattc_if, param->write.conn_id, /*use_indications=*/false);
+              enable_notify_(gattc_if, conn_id, /*use_indications=*/false);
             } else {
-              // If we've already tried notifications, try indications again as a last bounce
               last_cccd_used_indications_ = true;
-              enable_notify_(gattc_if, param->write.conn_id, /*use_indications=*/true);
+              enable_notify_(gattc_if, conn_id, /*use_indications=*/true);
             }
           }
         }
@@ -161,33 +180,32 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         break;
       }
 
-      case ESP_GATTC_NOTIFY_EVT:
-      case ESP_GATTC_INDICATE_EVT: {
-        // We finally received data from the lock 🎉
+      case ESP_GATTC_NOTIFY_EVT: {
+        // Handles both notifications and indications; see is_notify flag
+        const bool is_notify = param->notify.is_notify;
         const uint8_t *data = param->notify.value;
         const uint16_t len = param->notify.value_len;
 
-        // Stop HELLO retry cadence
+        // Stop HELLO retries
         hello_retry_due_ms_ = 0;
         hello_attempts_ = 0;
 
         notify_seen_count_++;
         if (notify_count_ != nullptr) notify_count_->publish_state((float) notify_seen_count_);
 
-        // Log first bytes to help with reverse engineering
+        // Log first bytes to help with decoding
         char buf[64] = {0};
         size_t to_dump = len > 20 ? 20 : len;
         size_t off = 0;
         for (size_t i = 0; i < to_dump && (off + 3) < sizeof(buf); i++) {
           off += snprintf(buf + off, sizeof(buf) - off, "%02X ", data[i]);
         }
-        ESP_LOGD(TAG, "NOTIFY len=%u first=%s", (unsigned) len, buf);
+        ESP_LOGD(TAG, "%s len=%u first=%s", is_notify ? "NOTIFY" : "INDICATE", (unsigned) len, buf);
 
         if (last_notify_text_ != nullptr) {
-          // Store entire payload as hex (truncated if extremely long)
           std::string hex;
-          hex.reserve(len * 2 + 2);
-          char b[3];
+          hex.reserve(len * 3);
+          char b[4];
           for (uint16_t i = 0; i < len; i++) {
             snprintf(b, sizeof(b), "%02X", data[i]);
             hex += b;
@@ -196,8 +214,9 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
           last_notify_text_->publish_state(hex.c_str());
         }
 
-        // TODO: parse handshake/session here. If a session key is derived, publish to session_key_text_ and
-        //       set key_received_->publish_state(true).
+        // TODO: parse handshake/session here. If a session key is derived:
+        // if (session_key_text_) session_key_text_->publish_state(key_string);
+        // if (key_received_) key_received_->publish_state(true);
         break;
       }
 
@@ -212,7 +231,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       }
 
       default:
-        // Ignored
         break;
     }
   }
@@ -220,7 +238,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
  protected:
   // ===== Helpers =====
   void resolve_handles_() {
-    // Known fixed handles on the target FW observed in your logs:
+    // Fixed handles from your traces:
     //   write  = 0x0009
     //   notify = 0x000B
     //   CCCD   = 0x000C
@@ -235,12 +253,15 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void enable_notify_(esp_gatt_if_t gattc_if, uint16_t conn_id, bool use_indications) {
     // 0x0001 = notifications, 0x0002 = indications
-    const uint8_t cccd_val[2] = {static_cast<uint8_t>(use_indications ? 0x02 : 0x01), 0x00};
+    const uint8_t v = static_cast<uint8_t>(use_indications ? 0x02 : 0x01);
+    const uint8_t cccd_val[2] = {v, 0x00};
     last_cccd_used_indications_ = use_indications;
 
     esp_err_t r = esp_ble_gattc_write_char_descr(gattc_if, conn_id, cccd_handle_,
-                                                 sizeof(cccd_val), const_cast<uint8_t *>(cccd_val),
-                                                 ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+                                                 sizeof(cccd_val),
+                                                 const_cast<uint8_t *>(cccd_val),
+                                                 ESP_GATT_WRITE_TYPE_RSP,
+                                                 ESP_GATT_AUTH_REQ_NONE);
     ESP_LOGD(TAG, "esp_ble_gattc_write_char_descr returned %d", (int) r);
   }
 
@@ -248,13 +269,11 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     auto *cli = this->parent();
     if (cli == nullptr) return;
 
-    // v1 = 16 bytes, v0 = 18 bytes (based on your logs)
+    // v1 = 16 bytes, v0 = 18 bytes (placeholders)
     uint8_t payload[18] = {0};
     uint16_t len = 0;
 
     if (version == 1) {
-      // Minimal placeholder HELLO v1 payload (adjust once protocol is finalized)
-      // Put a recognizable tag so we can see it on the wire.
       const uint8_t v1[16] = {0x48, 0x45, 0x4C, 0x4C, 0x4F, 0x31, 0x00, 0x00,
                               0xAA, 0x55, 0xAA, 0x55, 0x10, 0x00, 0x00, 0x00};
       std::memcpy(payload, v1, sizeof(v1));
@@ -270,7 +289,9 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     }
 
     esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), write_handle_,
-                                           len, payload, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+                                           len, payload,
+                                           ESP_GATT_WRITE_TYPE_RSP,
+                                           ESP_GATT_AUTH_REQ_NONE);
     if (r == ESP_OK) {
       hello_attempts_++;
     } else {
@@ -279,7 +300,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   }
 
   // ===== Members =====
-  // Handles (fixed for the observed lock FW; replace with dynamic UUID search if needed)
+  // Handles (fixed for observed FW)
   uint16_t write_handle_{0x0009};
   uint16_t notify_handle_{0x000B};
   uint16_t cccd_handle_{0x000C};
@@ -298,7 +319,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   uint32_t hello_retry_due_ms_{0};
   uint8_t current_hello_version_{1};
   uint8_t hello_attempts_{0};
-  uint8_t hello_attempts_max_{10};       // cap retries
+  uint8_t hello_attempts_max_{10};             // cap retries
   const uint32_t post_cccd_delay_ms_{800};     // wait a bit after CCCD write
   const uint32_t hello_retry_interval_ms_{1000};
 
