@@ -258,9 +258,11 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
     ESP_LOGD(TAG, "[auto] Sending real HELLO to handle 0x%04X (%u bytes)", write_handle_, (unsigned) len);
 
+// --- AROUND LINE 261 ---
+
     esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), write_handle_, len,
-                                           (uint8_t *) real_hello_payload, ESP_GATT_WRITE_TYPE_RSP,
-                                           ESP_GATT_AUTH_REQ_NO_MITM);
+                                     (uint8_t *) real_hello_payload, ESP_GATT_WRITE_TYPE_NO_RSP, // <-- CHANGE THIS LINE
+                                     ESP_GATT_AUTH_REQ_NO_MITM);
     if (r == ESP_OK) {
       hello_attempts_++;
     } else {
@@ -308,3 +310,4 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
 }  // namespace blackview_lock
 }  // namespace esphome
+
