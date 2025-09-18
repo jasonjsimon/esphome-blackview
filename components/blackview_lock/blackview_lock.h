@@ -57,7 +57,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   // ----- Public actions for YAML buttons (Restored for compatibility) -----
   void request_handshake() {
     ESP_LOGD(TAG, "Manual handshake requested. Starting process...");
-    if (this->parent() && this->parent()->connected) {
+    if (this->parent() && this->parent()->connected()) { // Corrected
       this->send_get_random_code_();
     } else {
       ESP_LOGW(TAG, "Cannot start handshake: not connected.");
@@ -165,7 +165,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void send_command_(uint16_t cmd_id, uint64_t random_code, const std::vector<uint8_t>& data) {
     auto *cli = this->parent();
-    if (cli == nullptr || !cli->connected) { // Corrected: is_connected -> connected
+    if (cli == nullptr || !cli->connected()) { // Corrected
       ESP_LOGW(TAG, "Cannot send command: not connected.");
       return;
     }
@@ -193,7 +193,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
     ESP_LOGD(TAG, "Writing command packet: %s", format_hex_pretty(packet.data(), packet.size()).c_str());
     
-    // Corrected: write_characteristic -> esp_ble_gattc_write_char
     esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), this->write_handle_,
                                            packet.size(), packet.data(),
                                            ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NO_MITM);
