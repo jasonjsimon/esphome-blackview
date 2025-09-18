@@ -1,6 +1,11 @@
 #pragma once
 #ifdef USE_ESP32
 
+#include <vector>
+#include <string>
+#include <cstdio>
+#include <cstdlib>
+
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 
@@ -16,7 +21,7 @@ namespace blackview_lock {
 
 static const char *const TAG = "blackview_lock";
 
-// Normalize IDF event name so we only handle one case label.
+// Normalize IDF event name so we only handle one label.
 #if defined(ESP_GATTC_SEARCH_CMP_EVT)
   #define GATTC_SEARCH_COMPLETE_EVT ESP_GATTC_SEARCH_CMP_EVT
 #elif defined(ESP_GATTC_SEARCH_CMPL_EVT)
@@ -27,7 +32,7 @@ static const char *const TAG = "blackview_lock";
 
 class BlackviewLock : public Component, public ble_client::BLEClientNode {
  public:
-  // ===== setters used by generated main.cpp =====
+  // ===== setters created from Python side =====
   void set_session_key_text_sensor(text_sensor::TextSensor *t) { session_key_text_ = t; }
   void set_last_notify_text_sensor(text_sensor::TextSensor *t) { last_notify_text_ = t; }
   void set_key_received_binary_sensor(binary_sensor::BinarySensor *b) { key_received_ = b; }
@@ -78,6 +83,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         if (param->search_cmpl.status == ESP_GATT_OK) {
           ESP_LOGI(TAG, "Service discovery complete; resolving handles...");
 
+          // If discovery mapping fails, use the working handles from your trace.
           if (!fb_write_)  fb_write_  = 0x0009;
           if (!fb_notify_) fb_notify_ = 0x000B;
           if (!fb_cccd_)   fb_cccd_   = 0x000C;
@@ -162,7 +168,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   void send_hello_(const char *tag) {
     if (!this->connected_flag_) return;
 
-    // “HELLO” from your btsnoop:
+    // From your btsnoop capture (works on your lock):
     // A5 E5 00 0C 03 04 00 00 00 01 14 24 80 03 D4 13
     std::vector<uint8_t> buf = {0xA5, 0xE5, 0x00, 0x0C, 0x03, 0x04,
                                 0x00, 0x00, 0x00, 0x01, 0x14, 0x24, 0x80, 0x03,
