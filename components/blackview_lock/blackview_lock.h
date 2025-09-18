@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esphome/core/component.h"
+#include "esphome/core/component.hh"
 #include "esphome/core/log.h"
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
@@ -50,6 +50,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   // ----- Component lifecycle -----
   void setup() override {
+    this->parent()->register_gap_event_handler(this, &BlackviewLock::gap_event_handler);
+    
     esp_ble_auth_req_t auth_req = (esp_ble_auth_req_t)(ESP_LE_AUTH_BOND | ESP_LE_AUTH_REQ_SC_ONLY);
     uint8_t key_size = 16;
     esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
@@ -96,6 +98,30 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         send_hello_();
         hello_retry_due_ms_ = now + hello_retry_interval_ms_;
       }
+    }
+  }
+
+  // ----- BLE GAP handler (for security events) -----
+  void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+    switch (event) {
+      case ESP_GAP_BLE_AUTH_CMPL_EVT: {
+        if (param->ble_security.auth_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+          ESP_LOGI(TAG, "GAP AUTH OK: address=%02x:%02x:%02x:%02x:%02x:%02x",
+                   param->ble_security.auth_cmpl.bd_addr[0], param->ble_security.auth_cmpl.bd_addr[1],
+                   param->ble_security.auth_cmpl.bd_addr[2], param->ble_security.auth_cmpl.bd_addr[3],
+                   param->ble_security.auth_cmpl.bd_addr[4], param->ble_security.auth_cmpl.bd_addr[5]);
+        } else {
+          ESP_LOGW(TAG, "GAP AUTH FAILED: status=0x%x", param->ble_security.auth_cmpl.status);
+        }
+        break;
+      }
+      case ESP_GAP_BLE_SEC_REQ_EVT:
+        ESP_LOGI(TAG, "GAP SECURITY REQUEST RECEIVED");
+        // Automatically accept the security request
+        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+        break;
+      default:
+        break;
     }
   }
 
@@ -258,11 +284,9 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
     ESP_LOGD(TAG, "[auto] Sending real HELLO to handle 0x%04X (%u bytes)", write_handle_, (unsigned) len);
 
-// --- AROUND LINE 261 ---
-
     esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), write_handle_, len,
-                                     (uint8_t *) real_hello_payload, ESP_GATT_WRITE_TYPE_NO_RSP, // <-- CHANGE THIS LINE
-                                     ESP_GATT_AUTH_REQ_NO_MITM);
+                                           (uint8_t *) real_hello_payload, ESP_GATT_WRITE_TYPE_NO_RSP,
+                                           ESP_GATT_AUTH_REQ_NO_MITM);
     if (r == ESP_OK) {
       hello_attempts_++;
     } else {
@@ -310,4 +334,3 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
 }  // namespace blackview_lock
 }  // namespace esphome
-
