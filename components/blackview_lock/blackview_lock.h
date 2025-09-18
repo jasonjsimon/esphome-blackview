@@ -49,8 +49,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   // ----- Component lifecycle -----
   void setup() override {
-    // --- CRITICAL CHANGE: Requesting Legacy Bonding instead of Secure Connections ---
-    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_BOND;
+    // Requesting Legacy Bonding
+    esp_ble_auth_req_t auth_req = ESP_BLE_AUTH_REQ_BOND; // Corrected typo
     
     uint8_t key_size = 16;
     esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
@@ -148,7 +148,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
             ESP_LOGW(TAG, "REG_FOR_NOTIFY failed (status %d) for handle 0x%04X",
                      (int) param->reg_for_notify.status, notify_handle_);
           }
-          // We rely on ESPHome/IDF to write CCCD; we just wait for WRITE_DESCR_EVT on our CCCD handle.
         }
         break;
       }
@@ -161,7 +160,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
             // Give peer a bit to arm notifications, then send HELLO
             post_cccd_hello_due_ms_ = millis() + post_cccd_delay_ms_;
           } else {
-            // Common transient error (e.g., 128/133) — we don't second-guess the stack here; it will retry if needed.
             ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", cccd_handle_,
                      (int) param->write.status);
           }
@@ -208,7 +206,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
           }
           last_notify_text_->publish_state(hex.c_str());
         }
-        // TODO: decode response / derive session key here.
         break;
       }
 
@@ -260,7 +257,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     ESP_LOGD(TAG, "[auto] Sending real HELLO to handle 0x%04X (%u bytes)", write_handle_, (unsigned) len);
 
     esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), write_handle_, len,
-                                           (uint8_t *) real_hello_payload, ESP_GATTC_WRITE_TYPE_NO_RSP,
+                                           (uint8_t *) real_hello_payload, ESP_GATT_WRITE_TYPE_NO_RSP, // Corrected typo
                                            ESP_GATT_AUTH_REQ_NO_MITM);
     if (r == ESP_OK) {
       hello_attempts_++;
