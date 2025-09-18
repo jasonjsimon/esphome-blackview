@@ -51,7 +51,20 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   }
 
   // ----- Component lifecycle -----
-  void setup() override {}
+void setup() override {
+  esp_ble_auth_req_t auth_req = (esp_ble_auth_req_t)(ESP_LE_AUTH_BOND | ESP_LE_AUTH_REQ_SC_ONLY);
+  uint8_t key_size = 16;
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
+  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+
+  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &resp_key, sizeof(resp_key));
+}
+
   void dump_config() override {
     ESP_LOGCONFIG(TAG, "Blackview Lock");
     ESP_LOGCONFIG(TAG, "  Write handle:  0x%04X", write_handle_);
@@ -306,3 +319,4 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
 }  // namespace blackview_lock
 }  // namespace esphome
+
