@@ -1,239 +1,257 @@
 #pragma once
-
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 #include "esphome/components/ble_client/ble_client.h"
-#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/sensor/sensor.h"
 
-#include <algorithm>
-#include <cstring>
-#include <cstdio>
-
-extern "C" {
-  #include "esp_gattc_api.h"
-  #include "esp_random.h"
-}
+#include "esp_gattc_api.h"
+#include "esp_gatt_defs.h"
+#include "esp_gap_ble_api.h"
+#include "esp_bt_defs.h"
 
 namespace esphome {
 namespace blackview_lock {
 
 static const char *const TAG = "blackview_lock";
 
-// ESP-IDF spelling shim
-#if defined(ESP_GATTC_SEARCH_CMP_EVT) && !defined(ESP_GATTC_SEARCH_CMPL_EVT)
-#define ESP_GATTC_SEARCH_CMPL_EVT ESP_GATTC_SEARCH_CMP_EVT
-#endif
-#if defined(ESP_GATTC_SEARCH_CMPL_EVT) && !defined(ESP_GATTC_SEARCH_CMP_EVT)
-#define ESP_GATTC_SEARCH_CMP_EVT ESP_GATTC_SEARCH_CMPL_EVT
-#endif
-
+// 0x1910 service with two characteristics 0x2B11 (write) and 0x2B10 (notify)
 class BlackviewLock : public Component, public ble_client::BLEClientNode {
  public:
-  // Diagnostics hooks (wired in YAML)
+  // entity wiring
   void set_session_key_text_sensor(text_sensor::TextSensor *t) { session_key_text_ = t; }
   void set_last_notify_text_sensor(text_sensor::TextSensor *t) { last_notify_text_ = t; }
   void set_key_received_binary_sensor(binary_sensor::BinarySensor *b) { key_received_ = b; }
   void set_connected_binary_sensor(binary_sensor::BinarySensor *b) { connected_ = b; }
   void set_notify_count_sensor(sensor::Sensor *s) { notify_count_ = s; }
 
-  // No-ops to satisfy generated main.cpp without touching YAML
-  void set_prefer_write_no_rsp(bool /*v*/) {}
-  void set_write_uuid(const char * /*uuid*/) {}
-  void set_notify_uuid(const char * /*uuid*/) {}
-
-  // Control
+  // request a handshake from the main loop
   void request_handshake() { wants_handshake_ = true; }
-  void request_handshake_mode(int mode) { handshake_mode_ = mode; wants_handshake_ = true; }
+  void request_handshake_mode(int mode) {
+    handshake_mode_[0] = static_cast<uint8_t>(mode & 0xFF);
+    wants_handshake_ = true;
+  }
 
-  // Component
   void dump_config() override {
-    ESP_LOGCONFIG(TAG, "Blackview Lock Bridge:");
+    ESP_LOGCONFIG(TAG, "Blackview Lock");
     ESP_LOGCONFIG(TAG, "  Write handle:  0x%04X", write_handle_);
     ESP_LOGCONFIG(TAG, "  Notify handle: 0x%04X", notify_handle_);
     ESP_LOGCONFIG(TAG, "  CCCD handle:   0x%04X", cccd_handle_);
   }
 
-  void loop() override {
-    const uint32_t now = millis();
-    // CHANGED: settle delay from 400ms -> 1200ms
-    const bool post_cccd_settle = (cccd_enabled_ms_ == 0) || (now - cccd_enabled_ms_ >= 1200);
-    if (connected_flag_ && notify_enabled_ && post_cccd_settle &&
-        (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
-      auto *p = this->parent();
-      if (p != nullptr) {
-        send_hello_(p->get_gattc_if(), p->get_conn_id(), "auto-v1");
-      }
-    }
-  }
-
-  // BLEClientNode
+  // BLE client callbacks (GATTC)
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override {
     switch (event) {
-      case ESP_GATTC_OPEN_EVT:
       case ESP_GATTC_CONNECT_EVT: {
         connected_flag_ = true;
+        // cache peer address for optional encryption
+        memcpy(remote_bda_, param->connect.remote_bda, sizeof(remote_bda_));
+        have_bda_ = true;
         if (connected_) connected_->publish_state(true);
         ESP_LOGI(TAG, "Connected.");
-        break;
-      }
-
-      case ESP_GATTC_SEARCH_CMPL_EVT: {
-        ESP_LOGI(TAG, "Service discovery complete");
-        ESP_LOGI(TAG, "Service discovery complete; resolving handles...");
-        resolve_handles_();
-        ESP_LOGI(TAG, "Resolved: write_handle=0x%04X, notify_handle=0x%04X", write_handle_, notify_handle_);
-        ESP_LOGI(TAG, "CCCD handle 0x%04X; enabling notifications…", cccd_handle_);
-        enable_notify_(gattc_if, param->search_cmpl.conn_id);
-        break;
-      }
-
-      case ESP_GATTC_WRITE_DESCR_EVT: {
-        if (param->write.handle == cccd_handle_ && param->write.status == ESP_GATT_OK) {
-          ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", param->write.handle);
-          notify_enabled_ = true;
-          cccd_enabled_ms_ = millis();
-          wants_handshake_ = true;  // loop will send after settle delay
-        } else {
-          ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", param->write.handle, (int) param->write.status);
+        // Proactively request encryption/bonding; Just Works should auto-accept
+        if (have_bda_) {
+          esp_ble_set_encryption(remote_bda_, ESP_BLE_SEC_ENCRYPT);
         }
         break;
       }
-
+      case ESP_GATTC_OPEN_EVT: {
+        // no-op
+        break;
+      }
+      case ESP_GATTC_SEARCH_CMPL_EVT: {
+        ESP_LOGI(TAG, "Service discovery complete");
+        this->resolve_handles_();
+        // Enable notifications (first try indications=0x0002, fallback to notifications=0x0001 on failure)
+        this->enable_notify_(gattc_if, param->search_cmpl.conn_id, /*use_indications=*/true);
+        // queue a HELLO soon after CCCD attempt
+        pending_auto_hello_ = true;
+        pending_conn_id_ = param->search_cmpl.conn_id;
+        pending_gattc_if_ = gattc_if;
+        break;
+      }
+      case ESP_GATTC_WRITE_DESCR_EVT: {
+        // CCCD write result
+        if (param->write.status == ESP_GATT_OK) {
+          ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", param->write.handle);
+          if (pending_auto_hello_) {
+            this->send_hello_(gattc_if, param->write.conn_id, /*prefer_write_no_rsp=*/false, "auto");
+            pending_auto_hello_ = false;
+          }
+        } else {
+          ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", param->write.handle, param->write.status);
+          // Try switching CCCD mode once (indications -> notifications)
+          if (last_cccd_used_indications_) {
+            last_cccd_used_indications_ = false;
+            this->enable_notify_(gattc_if, param->write.conn_id, /*use_indications=*/false);
+          } else {
+            // still try HELLO even without notifications; some firmwares allow command-only
+            if (pending_auto_hello_) {
+              this->send_hello_(gattc_if, param->write.conn_id, /*prefer_write_no_rsp=*/false, "auto-no-cccd");
+              pending_auto_hello_ = false;
+            }
+          }
+        }
+        break;
+      }
       case ESP_GATTC_WRITE_CHAR_EVT: {
         ESP_LOGI(TAG, "Write OK (handle 0x%04X)", param->write.handle);
         break;
       }
-
       case ESP_GATTC_NOTIFY_EVT: {
+        // incoming notification/indication
         notify_counter_++;
         if (notify_count_) notify_count_->publish_state(static_cast<float>(notify_counter_));
-
-        // Hex dump (cap 32 bytes)
-        char hex[2 * 32 + 1] = {0};
-        size_t n = std::min<size_t>(param->notify.value_len, 32);
-        for (size_t i = 0; i < n; i++) std::sprintf(hex + 2 * i, "%02X", param->notify.value[i]);
+        char hex[256] = {0};
+        size_t n = param->notify.value_len;
+        size_t k = 0;
+        for (size_t i = 0; i < n && (k + 3) < sizeof(hex); i++) {
+          k += snprintf(hex + k, sizeof(hex) - k, "%02X", param->notify.value[i]);
+        }
         if (last_notify_text_) last_notify_text_->publish_state(hex);
-
-        if (param->notify.value_len >= 8 && key_received_ && !key_received_seen_) {
+        // first 8 bytes received -> mark "key received" once
+        if (n >= 8 && key_received_ && !key_received_seen_) {
           key_received_seen_ = true;
           key_received_->publish_state(true);
+          if (session_key_text_) session_key_text_->publish_state(hex);
         }
         break;
       }
-
       case ESP_GATTC_DISCONNECT_EVT: {
         connected_flag_ = false;
-        notify_enabled_ = false;
-        cccd_enabled_ms_ = 0;
         if (connected_) connected_->publish_state(false);
-        ESP_LOGD(TAG, "Disconnected, reason 0x%02X", param->disconnect.reason);
+        ESP_LOGD(TAG, "Disconnected, reason 0x%X", param->disconnect.reason);
         break;
       }
-
       default:
         break;
+    } // switch
+  }
+
+  void loop() override {
+    // Send periodic HELLO if connected
+    const uint32_t now = millis();
+    if (connected_flag_ && (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
+      last_hello_ms_ = now;
+      BLEClient *p = this->parent();
+      if (!p) return;
+      uint16_t conn_id = p->get_conn_id();
+      esp_gatt_if_t gi = static_cast<esp_gatt_if_t>(p->get_gattc_if());
+      this->send_hello_(gi, conn_id, /*prefer_write_no_rsp=*/false, wants_handshake_ ? "manual" : "auto");
+      wants_handshake_ = false;
     }
   }
 
  protected:
-  // CRC-16/XMODEM (poly 0x1021, init 0x0000)
-  static uint16_t crc_xmodem_(const uint8_t *data, size_t len) {
-    uint16_t crc = 0x0000;
-    for (size_t i = 0; i < len; i++) {
-      crc ^= (uint16_t)data[i] << 8;
-      for (int b = 0; b < 8; b++) {
-        if (crc & 0x8000) crc = (crc << 1) ^ 0x1021;
-        else              crc <<= 1;
-      }
-    }
-    return crc;
-  }
-
-  void enable_notify_(esp_gatt_if_t gattc_if, uint16_t conn_id) {
-    if (!cccd_handle_) return;
-    // CHANGED: enable INDICATIONS (0x0002) instead of NOTIFICATIONS (0x0001)
-    const uint8_t en[2] = {0x02, 0x00};
-    esp_ble_gattc_write_char_descr(gattc_if, conn_id, cccd_handle_, sizeof(en), (uint8_t *)en,
-                                   ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
-  }
-
-  // Build & write HELLO v1 (18 bytes total):
-  //   Header [A5 E5] + Length [00 0E] + Payload(12) + CRC16(payload) big-endian
-  void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id, const char *label) {
-    if (!write_handle_ || gattc_if == ESP_GATT_IF_NONE) return;
-
-    // 12-byte payload: version markers + 10 random bytes
-    uint8_t payload[12];
-    payload[0] = 0x03;
-    payload[1] = 0x04;
-    uint32_t r1 = esp_random();
-    uint32_t r2 = esp_random();
-    uint32_t r3 = esp_random();
-    payload[2]  = (uint8_t)(r1 & 0xFF);
-    payload[3]  = (uint8_t)((r1 >> 8) & 0xFF);
-    payload[4]  = (uint8_t)((r1 >> 16) & 0xFF);
-    payload[5]  = (uint8_t)((r1 >> 24) & 0xFF);
-    payload[6]  = (uint8_t)(r2 & 0xFF);
-    payload[7]  = (uint8_t)((r2 >> 8) & 0xFF);
-    payload[8]  = (uint8_t)((r2 >> 16) & 0xFF);
-    payload[9]  = (uint8_t)((r2 >> 24) & 0xFF);
-    payload[10] = (uint8_t)(r3 & 0xFF);
-    payload[11] = (uint8_t)((r3 >> 8) & 0xFF);
-
-    const uint16_t crc = crc_xmodem_(payload, sizeof(payload));
-
-    uint8_t msg[18];
-    msg[0] = 0xA5; msg[1] = 0xE5;
-    msg[2] = 0x00; msg[3] = 0x0E;  // length includes CRC (14 = 12+2)
-    std::memcpy(&msg[4], payload, sizeof(payload));
-    msg[16] = (uint8_t)((crc >> 8) & 0xFF);  // big-endian
-    msg[17] = (uint8_t)(crc & 0xFF);
-
-    ESP_LOGD(TAG, "[%s] HELLO v1 to handle 0x%04X (18 bytes)", label ? label : "?", write_handle_);
-
-    // Keep NO_RSP for now; if this still fails we'll try WRITE_TYPE_RSP next
-    esp_err_t err = esp_ble_gattc_write_char(
-        gattc_if, conn_id, write_handle_, sizeof(msg), msg,
-        ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-
-    if (err != ESP_OK) {
-      ESP_LOGW(TAG, "HELLO write failed: err=%d", (int) err);
-    }
-
-    last_hello_ms_ = millis();
-    wants_handshake_ = false;
-  }
-
+  // hardcoded default handles discovered from snoop; pairing mode may still require encryption
   void resolve_handles_() {
     write_handle_  = 0x0009;
     notify_handle_ = 0x000B;
     cccd_handle_   = 0x000C;
   }
 
-  // State
+  void enable_notify_(esp_gatt_if_t gattc_if, uint16_t conn_id, bool use_indications) {
+    if (!cccd_handle_) return;
+    uint8_t en[2] = { static_cast<uint8_t>(use_indications ? 0x02 : 0x01), 0x00 };
+    last_cccd_used_indications_ = use_indications;
+    esp_ble_gattc_write_char_descr(gattc_if, conn_id, cccd_handle_, sizeof(en), en,
+                                   ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+  }
+
+  // Build and send a "HELLO" packet (two variants tried in the field)
+  void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id, bool /*prefer_write_no_rsp*/, const char *why) {
+    if (!write_handle_) return;
+
+    // Choose variant based on current mode (toggle between v0 and v1 every call when auto)
+    bool use_v1 = toggle_v1_;
+    if (wants_handshake_) {
+      // on manual request try v1 first
+      use_v1 = true;
+    }
+    toggle_v1_ = !toggle_v1_;
+
+    if (use_v1) {
+      // v1: 16-byte frame: A5 E5 00 0C <nonce 8> 00 00 <crc16>
+      uint8_t buf[16];
+      buf[0] = 0xA5; buf[1] = 0xE5; buf[2] = 0x00; buf[3] = 0x0C;
+      // simple rolling nonce from millis()
+      uint64_t nonce = (uint64_t)millis();
+      for (int i = 0; i < 8; i++) buf[4 + i] = (nonce >> (i*8)) & 0xFF;
+      buf[12] = 0x00; buf[13] = 0x00;
+      uint16_t crc = crc16_xmodem_(buf, 14);
+      buf[14] = (crc >> 8) & 0xFF;
+      buf[15] = crc & 0xFF;
+      ESP_LOGD(TAG, "[%s-v1] HELLO v1 to handle 0x%04X (16 bytes)", why, write_handle_);
+      esp_ble_gattc_write_char(gattc_if, conn_id, write_handle_, sizeof(buf), buf,
+                               ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+    } else {
+      // v0: 18-byte frame: A5 E5 00 0E 00 00 <nonce 8> 00 00 <crc16>
+      uint8_t buf[18];
+      buf[0] = 0xA5; buf[1] = 0xE5; buf[2] = 0x00; buf[3] = 0x0E;
+      buf[4] = 0x00; buf[5] = 0x00;
+      uint64_t nonce = (uint64_t)millis();
+      for (int i = 0; i < 8; i++) buf[6 + i] = (nonce >> (i*8)) & 0xFF;
+      buf[14] = 0x00; buf[15] = 0x00;
+      uint16_t crc = crc16_xmodem_(buf, 16);
+      buf[16] = (crc >> 8) & 0xFF;
+      buf[17] = crc & 0xFF;
+      ESP_LOGD(TAG, "[%s] HELLO v0 to handle 0x%04X (18 bytes)", why, write_handle_);
+      esp_ble_gattc_write_char(gattc_if, conn_id, write_handle_, sizeof(buf), buf,
+                               ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+    }
+  }
+
+  static uint16_t crc16_xmodem_(const uint8_t *data, size_t len) {
+    uint16_t crc = 0x0000;
+    for (size_t i = 0; i < len; i++) {
+      crc ^= ((uint16_t)data[i]) << 8;
+      for (int b = 0; b < 8; b++) {
+        if (crc & 0x8000) crc = (crc << 1) ^ 0x1021;
+        else crc <<= 1;
+      }
+    }
+    return crc;
+  }
+
+  // wiring
   text_sensor::TextSensor *session_key_text_{nullptr};
   text_sensor::TextSensor *last_notify_text_{nullptr};
   binary_sensor::BinarySensor *key_received_{nullptr};
   binary_sensor::BinarySensor *connected_{nullptr};
   sensor::Sensor *notify_count_{nullptr};
 
+  // state
+  bool connected_flag_{false};
+  bool wants_handshake_{false};
+  uint8_t handshake_mode_[1]{0};  // just store a byte for now
+  bool key_received_seen_{false};
+
+  // auto hello pacing
+  uint32_t last_hello_ms_{0};
+  const uint32_t hello_interval_ms_{8000};
+  bool toggle_v1_{true};
+
+  // ATT handles
   uint16_t write_handle_{0};
   uint16_t notify_handle_{0};
   uint16_t cccd_handle_{0};
 
-  bool connected_flag_{false};
-  bool notify_enabled_{false};
-  bool key_received_seen_{false};
-
+  // notify count
   uint32_t notify_counter_{0};
-  bool     wants_handshake_{false};
-  int      handshake_mode_{0};
-  uint32_t last_hello_ms_{0};
-  uint32_t cccd_enabled_ms_{0};
-  static constexpr uint32_t hello_interval_ms_{8000};
+
+  // CCCD attempt tracking
+  bool last_cccd_used_indications_{true};
+
+  // connection identifiers for deferred send
+  bool pending_auto_hello_{false};
+  uint16_t pending_conn_id_{0};
+  esp_gatt_if_t pending_gattc_if_{ESP_GATT_IF_NONE};
+
+  // peer address for encryption
+  esp_bd_addr_t remote_bda_{0};
+  bool have_bda_{false};
 };
 
 }  // namespace blackview_lock
