@@ -1,68 +1,77 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import ble_client, text_sensor, binary_sensor, sensor
+from esphhome.components import ble_client, binary_sensor, sensor, text_sensor
 from esphome.const import CONF_ID
 
-DEPENDENCIES = ['ble_client']
+CODEOWNERS = [""]
 
-blackview_lock_ns = cg.esphome_ns.namespace('blackview_lock')
-BlackviewLock = blackview_lock_ns.class_('BlackviewLock', cg.Component, ble_client.BLEClientNode)
+blackview_ns = cg.esphome_ns.namespace("blackview_lock")
+BlackviewLock = blackview_ns.class_("BlackviewLock", cg.Component, ble_client.BLEClientNode)
+
+CONF_BLE_CLIENT_ID = "ble_client_id"
+CONF_PREFER_WRITE_NO_RSP = "prefer_write_no_rsp"
+CONF_WRITE_UUID = "write_uuid"
+CONF_NOTIFY_UUID = "notify_uuid"
+CONF_FALLBACK_WRITE_HANDLE = "fallback_write_handle"
+CONF_FALLBACK_NOTIFY_HANDLE = "fallback_notify_handle"
+CONF_FALLBACK_CCCD_HANDLE = "fallback_cccd_handle"
+
+CONF_SESSION_KEY = "session_key"
+CONF_LAST_NOTIFY = "last_notify"
+CONF_KEY_RECEIVED = "key_received"
+CONF_CONNECTED = "connected"
+CONF_NOTIFY_COUNT = "notify_count"
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(BlackviewLock),
-    cv.Required("ble_client_id"): cv.use_id(ble_client.BLEClient),
+    cv.GenerateID(CONF_BLE_CLIENT_ID): cv.use_id(ble_client.BLEClient),
+    cv.Optional(CONF_PREFER_WRITE_NO_RSP, default=False): cv.boolean,
+    cv.Optional(CONF_WRITE_UUID, default="00002b11-0000-1000-8000-00805f9b34fb"): cv.uuid,
+    cv.Optional(CONF_NOTIFY_UUID, default="00002b10-0000-1000-8000-00805f9b34fb"): cv.uuid,
+    cv.Optional(CONF_FALLBACK_WRITE_HANDLE): cv.hex_uint16_t,
+    cv.Optional(CONF_FALLBACK_NOTIFY_HANDLE): cv.hex_uint16_t,
+    cv.Optional(CONF_FALLBACK_CCCD_HANDLE): cv.hex_uint16_t,
 
-    # NEW optional fields you tried to use in YAML
-    cv.Optional("fallback_write_handle"): cv.hex_uint16_t,
-    cv.Optional("fallback_notify_handle"): cv.hex_uint16_t,
-    cv.Optional("fallback_cccd_handle"): cv.hex_uint16_t,
-    cv.Optional("prefer_write_no_rsp", default=False): cv.boolean,
-
-    # (Optional) UUIDs if we ever want to change them without code
-    cv.Optional("write_uuid", default="00002b11-0000-1000-8000-00805f9b34fb"): cv.string,
-    cv.Optional("notify_uuid", default="00002b10-0000-1000-8000-00805f9b34fb"): cv.string,
-
-    # already-supported sensors/bools
-    cv.Optional("session_key"): text_sensor.text_sensor_schema(),
-    cv.Optional("last_notify"): text_sensor.text_sensor_schema(),
-    cv.Optional("key_received"): binary_sensor.binary_sensor_schema(),
-    cv.Optional("connected"): binary_sensor.binary_sensor_schema(),
-    cv.Optional("notify_count"): sensor.sensor_schema(unit_of_measurement="msgs", accuracy_decimals=0),
+    cv.Optional(CONF_SESSION_KEY): text_sensor.TEXT_SENSOR_SCHEMA,
+    cv.Optional(CONF_LAST_NOTIFY): text_sensor.TEXT_SENSOR_SCHEMA,
+    cv.Optional(CONF_KEY_RECEIVED): binary_sensor.BINARY_SENSOR_SCHEMA,
+    cv.Optional(CONF_CONNECTED): binary_sensor.BINARY_SENSOR_SCHEMA,
+    cv.Optional(CONF_NOTIFY_COUNT): sensor.SENSOR_SCHEMA,
 }).extend(cv.COMPONENT_SCHEMA)
+
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
+    await ble_client.register_ble_node(var, config[CONF_BLE_CLIENT_ID])
     await cg.register_component(var, config)
-    parent = await cg.get_variable(config["ble_client_id"])
-    cg.add(parent.register_ble_node(var))
 
-    # NEW: plumb optional fields into the C++ object
-    if "fallback_write_handle" in config:
-        cg.add(var.set_fallback_write_handle(config["fallback_write_handle"]))
-    if "fallback_notify_handle" in config:
-        cg.add(var.set_fallback_notify_handle(config["fallback_notify_handle"]))
-    if "fallback_cccd_handle" in config:
-        cg.add(var.set_fallback_cccd_handle(config["fallback_cccd_handle"]))
-    if "prefer_write_no_rsp" in config:
-        cg.add(var.set_prefer_write_no_rsp(config["prefer_write_no_rsp"]))
-    if "write_uuid" in config:
-        cg.add(var.set_write_uuid(config["write_uuid"]))
-    if "notify_uuid" in config:
-        cg.add(var.set_notify_uuid(config["notify_uuid"]))
+    cg.add(var.set_prefer_write_no_rsp(config[CONF_PREFER_WRITE_NO_RSP]))
+    cg.add(var.set_write_uuid(str(config[CONF_WRITE_UUID]).lower()))
+    cg.add(var.set_notify_uuid(str(config[CONF_NOTIFY_UUID]).lower()))
 
-    # sensors
-    if "session_key" in config:
-        sens = await text_sensor.new_text_sensor(config["session_key"])
-        cg.add(var.set_session_key_sensor(sens))
-    if "last_notify" in config:
-        sens = await text_sensor.new_text_sensor(config["last_notify"])
-        cg.add(var.set_last_notify_sensor(sens))
-    if "key_received" in config:
-        bs = await binary_sensor.new_binary_sensor(config["key_received"])
-        cg.add(var.set_key_received_sensor(bs))
-    if "connected" in config:
-        bs = await binary_sensor.new_binary_sensor(config["connected"])
-        cg.add(var.set_connected_sensor(bs))
-    if "notify_count" in config:
-        sc = await sensor.new_sensor(config["notify_count"])
-        cg.add(var.set_notify_count_sensor(sc))
+    if CONF_FALLBACK_WRITE_HANDLE in config:
+        cg.add(var.set_fallback_write_handle(config[CONF_FALLBACK_WRITE_HANDLE]))
+    if CONF_FALLBACK_NOTIFY_HANDLE in config:
+        cg.add(var.set_fallback_notify_handle(config[CONF_FALLBACK_NOTIFY_HANDLE]))
+    if CONF_FALLBACK_CCCD_HANDLE in config:
+        cg.add(var.set_fallback_cccd_handle(config[CONF_FALLBACK_CCCD_HANDLE]))
+
+    if CONF_SESSION_KEY in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_SESSION_KEY])
+        cg.add(var.set_session_key_text_sensor(sens))
+
+    if CONF_LAST_NOTIFY in config:
+        sens2 = await text_sensor.new_text_sensor(config[CONF_LAST_NOTIFY])
+        cg.add(var.set_last_notify_text_sensor(sens2))
+
+    if CONF_KEY_RECEIVED in config:
+        bin1 = await binary_sensor.new_binary_sensor(config[CONF_KEY_RECEIVED])
+        cg.add(var.set_key_received_binary_sensor(bin1))
+
+    if CONF_CONNECTED in config:
+        bin2 = await binary_sensor.new_binary_sensor(config[CONF_CONNECTED])
+        cg.add(var.set_connected_binary_sensor(bin2))
+
+    if CONF_NOTIFY_COUNT in config:
+        sen = await sensor.new_sensor(config[CONF_NOTIFY_COUNT])
+        cg.add(var.set_notify_count_sensor(sen))
