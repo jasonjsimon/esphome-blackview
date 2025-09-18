@@ -28,7 +28,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   void set_connected_binary_sensor(binary_sensor::BinarySensor *b) { connected_ = b; }
   void set_notify_count_sensor(sensor::Sensor *s) { notify_count_ = s; }
 
-  // Compatibility no-ops (called by generated main.cpp)
+  // Back-compat no-ops so you don't need to edit YAML / main.cpp
   void set_prefer_write_no_rsp(bool) {}
   void set_write_uuid(const char *) {}
   void set_notify_uuid(const char *) {}
@@ -57,29 +57,22 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         have_bda_ = true;
         if (connected_) connected_->publish_state(true);
         ESP_LOGI(TAG, "Connected.");
-        if (have_bda_) {
-          // Request link encryption (Just Works if supported)
-          esp_ble_set_encryption(remote_bda_, ESP_BLE_SEC_ENCRYPT);
-        }
+        // IMPORTANT: Do NOT force encryption here; some locks reject and disconnect.
         break;
       }
       case ESP_GATTC_SEARCH_CMPL_EVT: {
         ESP_LOGI(TAG, "Service discovery complete");
         this->resolve_handles_();
-        // Try to enable indications first; if that fails we'll fallback to notifications
+        // Try indications first; if it fails we fall back to notifications.
         this->enable_notify_(gattc_if, param->search_cmpl.conn_id, /*use_indications=*/true);
-        pending_auto_hello_ = true;
-        pending_conn_id_ = param->search_cmpl.conn_id;
-        pending_gattc_if_ = gattc_if;
+        // We’ll send HELLO after descriptor write OK (or fallback path).
         break;
       }
       case ESP_GATTC_WRITE_DESCR_EVT: {
         if (param->write.status == ESP_GATT_OK) {
           ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", param->write.handle);
-          if (pending_auto_hello_) {
-            this->send_hello_(gattc_if, param->write.conn_id, /*prefer_write_no_rsp=*/false, "auto");
-            pending_auto_hello_ = false;
-          }
+          // Send initial HELLO once CCCD set.
+          this->send_hello_(gattc_if, param->write.conn_id, /*prefer_write_no_rsp=*/false, "auto");
         } else {
           ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", param->write.handle, param->write.status);
           // Fallback: indications -> notifications
@@ -87,10 +80,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
             last_cccd_used_indications_ = false;
             this->enable_notify_(gattc_if, param->write.conn_id, /*use_indications=*/false);
           } else {
-            if (pending_auto_hello_) {
-              this->send_hello_(gattc_if, param->write.conn_id, /*prefer_write_no_rsp=*/false, "auto-no-cccd");
-              pending_auto_hello_ = false;
-            }
+            // If even notifications fail, attempt HELLO anyway (some firmwares still accept writes).
+            this->send_hello_(gattc_if, param->write.conn_id, /*prefer_write_no_rsp=*/false, "auto-no-cccd");
           }
         }
         break;
@@ -158,8 +149,9 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id, bool /*prefer_write_no_rsp*/, const char *why) {
     if (!write_handle_) return;
 
+    // Alternate the 16B and 18B frames to cover both firmware variants.
     bool use_v1 = toggle_v1_;
-    if (wants_handshake_) use_v1 = true;  // on manual, prefer v1
+    if (wants_handshake_) use_v1 = true;  // on manual request, prefer v1
     toggle_v1_ = !toggle_v1_;
 
     if (use_v1) {
@@ -233,12 +225,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   // CCCD tracking
   bool last_cccd_used_indications_{true};
 
-  // Deferred hello
-  bool pending_auto_hello_{false};
-  uint16_t pending_conn_id_{0};
-  esp_gatt_if_t pending_gattc_if_{ESP_GATT_IF_NONE};
-
-  // Peer address for encryption
+  // Peer address (kept for possible future use)
   esp_bd_addr_t remote_bda_{0};
   bool have_bda_{false};
 };
