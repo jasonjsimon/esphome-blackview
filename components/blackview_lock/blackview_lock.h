@@ -7,7 +7,10 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"
 
-// ESP-IDF / Arduino headers we use directly
+#include <algorithm>
+#include <cstring>
+#include <cstdio>
+
 extern "C" {
   #include "esp_gattc_api.h"
   #include "esp_random.h"
@@ -18,29 +21,33 @@ namespace blackview_lock {
 
 static const char *const TAG = "blackview_lock";
 
-// --- SDK event-name shims (some Arduino/IDF versions spell this differently) ---
+// Event-name shims (SDK spelling differences)
 #if defined(ESP_GATTC_SEARCH_CMP_EVT) && !defined(ESP_GATTC_SEARCH_CMPL_EVT)
 #define ESP_GATTC_SEARCH_CMPL_EVT ESP_GATTC_SEARCH_CMP_EVT
 #endif
 #if defined(ESP_GATTC_SEARCH_CMPL_EVT) && !defined(ESP_GATTC_SEARCH_CMP_EVT)
 #define ESP_GATTC_SEARCH_CMP_EVT ESP_GATTC_SEARCH_CMPL_EVT
 #endif
-// -------------------------------------------------------------------------------
 
 class BlackviewLock : public Component, public ble_client::BLEClientNode {
  public:
-  // ---- optional diagnostics you wired in YAML ----
+  // Diagnostics hooks used in YAML
   void set_session_key_text_sensor(text_sensor::TextSensor *t) { session_key_text_ = t; }
   void set_last_notify_text_sensor(text_sensor::TextSensor *t) { last_notify_text_ = t; }
   void set_key_received_binary_sensor(binary_sensor::BinarySensor *b) { key_received_ = b; }
   void set_connected_binary_sensor(binary_sensor::BinarySensor *b) { connected_ = b; }
   void set_notify_count_sensor(sensor::Sensor *s) { notify_count_ = s; }
 
-  // ---- control hooks you call from lambdas/buttons ----
+  // Keep compatibility with generated main.cpp (no-ops for now)
+  void set_prefer_write_no_rsp(bool v) { prefer_write_no_rsp_ = v; }
+  void set_write_uuid(const char * /*uuid*/) {}
+  void set_notify_uuid(const char * /*uuid*/) {}
+
+  // Control
   void request_handshake() { wants_handshake_ = true; }
   void request_handshake_mode(int mode) { handshake_mode_ = mode; wants_handshake_ = true; }
 
-  // ---- Component API ----
+  // Component
   void dump_config() override {
     ESP_LOGCONFIG(TAG, "Blackview Lock Bridge:");
     ESP_LOGCONFIG(TAG, "  Write handle:  0x%04X", write_handle_);
@@ -53,13 +60,13 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     if (connected_flag_ && (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
       auto *p = this->parent();
       if (p != nullptr) {
-        uint16_t conn_id = p->conn_id();
-        send_hello_(p->gattc_if(), conn_id, /*prefer_write_no_rsp=*/false, "auto");
+        uint16_t conn_id = p->get_conn_id();
+        send_hello_(p->get_gattc_if(), conn_id, /*prefer_write_no_rsp=*/prefer_write_no_rsp_, "auto");
       }
     }
   }
 
-  // ---- BLEClientNode hook ----
+  // BLEClientNode
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override {
     switch (event) {
@@ -78,8 +85,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         ESP_LOGI(TAG, "Resolved: write_handle=0x%04X, notify_handle=0x%04X", write_handle_, notify_handle_);
         ESP_LOGI(TAG, "CCCD handle 0x%04X; enabling notifications…", cccd_handle_);
         enable_notify_(gattc_if, param->search_cmpl.conn_id);
-        // Kick off initial HELLO right away
-        send_hello_(gattc_if, param->search_cmpl.conn_id, /*prefer_write_no_rsp=*/false, "resolved");
+        send_hello_(gattc_if, param->search_cmpl.conn_id, /*prefer_write_no_rsp=*/prefer_write_no_rsp_, "resolved");
         break;
       }
 
@@ -97,13 +103,12 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         notify_counter_++;
         if (notify_count_) notify_count_->publish_state(static_cast<float>(notify_counter_));
 
-        // Pretty-print last notification as hex (for your diagnostics text sensor)
-        char hex[2 * 32 + 1] = {0};  // cap at 32 bytes visualized
+        // Hex dump of last notify (cap 32 bytes)
+        char hex[2 * 32 + 1] = {0};
         size_t n = std::min<size_t>(param->notify.value_len, 32);
-        for (size_t i = 0; i < n; i++) sprintf(hex + 2 * i, "%02X", param->notify.value[i]);
+        for (size_t i = 0; i < n; i++) std::sprintf(hex + 2 * i, "%02X", param->notify.value[i]);
         if (last_notify_text_) last_notify_text_->publish_state(hex);
 
-        // First time we see >= 8 bytes, flip "key received" binary sensor once
         if (param->notify.value_len >= 8 && key_received_ && !key_received_seen_) {
           key_received_seen_ = true;
           key_received_->publish_state(true);
@@ -118,15 +123,12 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       }
 
       default:
-        // Let the base class do any internal bookkeeping it needs
         break;
     }
   }
 
  protected:
-  // --- helpers ---------------------------------------------------------------
-
-  // CRC-16/XMODEM (poly 0x1021, init 0x0000, no reflect, no xorout)
+  // CRC-16/XMODEM (poly 0x1021, init 0x0000)
   static uint16_t crc_xmodem_(const uint8_t *data, size_t len) {
     uint16_t crc = 0x0000;
     for (size_t i = 0; i < len; i++) {
@@ -139,7 +141,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     return crc;
   }
 
-  // Enable notifications by writing 0x0001 to CCCD
   void enable_notify_(esp_gatt_if_t gattc_if, uint16_t conn_id) {
     if (!cccd_handle_) return;
     const uint8_t en[2] = {0x01, 0x00};
@@ -147,12 +148,11 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
                                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
   }
 
-  // Build & write the HELLO frame (16 bytes), with CRC over the 10-byte payload
+  // Build & write HELLO (16 bytes): [A5 E5][00 0C][payload(10)][CRC16(payload) LE]
   void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id,
                    bool /*prefer_write_no_rsp*/, const char *label) {
     if (!write_handle_ || gattc_if == ESP_GATT_IF_NONE) return;
 
-    // Payload = 0x03 0x04 + 8-byte nonce (LE)
     uint8_t payload[10];
     payload[0] = 0x03;
     payload[1] = 0x04;
@@ -167,20 +167,17 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     payload[8] = (uint8_t)((r2 >> 16) & 0xFF);
     payload[9] = (uint8_t)((r2 >> 24) & 0xFF);
 
-    // CRC over just the 10-byte payload
     const uint16_t crc = crc_xmodem_(payload, sizeof(payload));
 
-    // Final frame: 16 bytes -> [A5 E5] [00 0C] [payload(10)] [CRC LE]
     uint8_t msg[16];
     msg[0] = 0xA5; msg[1] = 0xE5;
     msg[2] = 0x00; msg[3] = 0x0C;
-    memcpy(&msg[4], payload, sizeof(payload));
+    std::memcpy(&msg[4], payload, sizeof(payload));
     msg[14] = (uint8_t)(crc & 0xFF);
     msg[15] = (uint8_t)((crc >> 8) & 0xFF);
 
     ESP_LOGD(TAG, "[%s] HELLO v1 to handle 0x%04X (16 bytes)", label ? label : "?", write_handle_);
 
-    // Use WRITE WITH RESPONSE for reliability
     esp_err_t err = esp_ble_gattc_write_char(
         gattc_if, conn_id, write_handle_, sizeof(msg), msg,
         ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
@@ -193,14 +190,14 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     wants_handshake_ = false;
   }
 
-  // For this lock, handles are stable. Keep the same ones you saw in logs.
+  // Handles for this lock (as seen in your logs)
   void resolve_handles_() {
     write_handle_  = 0x0009;
     notify_handle_ = 0x000B;
     cccd_handle_   = 0x000C;
   }
 
-  // ---- state ----
+  // State
   text_sensor::TextSensor *session_key_text_{nullptr};
   text_sensor::TextSensor *last_notify_text_{nullptr};
   binary_sensor::BinarySensor *key_received_{nullptr};
@@ -213,7 +210,9 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   bool connected_flag_{false};
   bool key_received_seen_{false};
+  bool prefer_write_no_rsp_{false};
 
+  uint32_t notify_counter_{0};
   bool     wants_handshake_{false};
   int      handshake_mode_{0};
   uint32_t last_hello_ms_{0};
