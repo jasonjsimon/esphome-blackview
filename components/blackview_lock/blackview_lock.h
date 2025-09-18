@@ -21,7 +21,7 @@ namespace blackview_lock {
 
 static const char *const TAG = "blackview_lock";
 
-// Event-name shims (SDK spelling differences)
+// ESP-IDF spelling shim
 #if defined(ESP_GATTC_SEARCH_CMP_EVT) && !defined(ESP_GATTC_SEARCH_CMPL_EVT)
 #define ESP_GATTC_SEARCH_CMPL_EVT ESP_GATTC_SEARCH_CMP_EVT
 #endif
@@ -31,14 +31,14 @@ static const char *const TAG = "blackview_lock";
 
 class BlackviewLock : public Component, public ble_client::BLEClientNode {
  public:
-  // Diagnostics hooks used in YAML
+  // Diagnostics hooks (wired in YAML)
   void set_session_key_text_sensor(text_sensor::TextSensor *t) { session_key_text_ = t; }
   void set_last_notify_text_sensor(text_sensor::TextSensor *t) { last_notify_text_ = t; }
   void set_key_received_binary_sensor(binary_sensor::BinarySensor *b) { key_received_ = b; }
   void set_connected_binary_sensor(binary_sensor::BinarySensor *b) { connected_ = b; }
   void set_notify_count_sensor(sensor::Sensor *s) { notify_count_ = s; }
 
-  // Keep compatibility with generated main.cpp (no-ops for now)
+  // No-ops to satisfy generated main.cpp without touching YAML
   void set_prefer_write_no_rsp(bool v) { prefer_write_no_rsp_ = v; }
   void set_write_uuid(const char * /*uuid*/) {}
   void set_notify_uuid(const char * /*uuid*/) {}
@@ -57,11 +57,11 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void loop() override {
     const uint32_t now = millis();
-    if (connected_flag_ && (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
+    if (connected_flag_ && notify_enabled_ &&
+        (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
       auto *p = this->parent();
       if (p != nullptr) {
-        uint16_t conn_id = p->get_conn_id();
-        send_hello_(p->get_gattc_if(), conn_id, /*prefer_write_no_rsp=*/prefer_write_no_rsp_, "auto");
+        send_hello_(p->get_gattc_if(), p->get_conn_id(), /*prefer_write_no_rsp=*/prefer_write_no_rsp_, "auto");
       }
     }
   }
@@ -74,7 +74,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       case ESP_GATTC_CONNECT_EVT: {
         connected_flag_ = true;
         if (connected_) connected_->publish_state(true);
-        ESP_LOGI(TAG, "Connected! Sending HELLO immediately...");
+        ESP_LOGI(TAG, "Connected.");
         break;
       }
 
@@ -84,13 +84,20 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         resolve_handles_();
         ESP_LOGI(TAG, "Resolved: write_handle=0x%04X, notify_handle=0x%04X", write_handle_, notify_handle_);
         ESP_LOGI(TAG, "CCCD handle 0x%04X; enabling notifications…", cccd_handle_);
+        // Enable notifications first; send HELLO only after WRITE_DESCR_EVT ack.
         enable_notify_(gattc_if, param->search_cmpl.conn_id);
-        send_hello_(gattc_if, param->search_cmpl.conn_id, /*prefer_write_no_rsp=*/prefer_write_no_rsp_, "resolved");
         break;
       }
 
       case ESP_GATTC_WRITE_DESCR_EVT: {
-        ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", param->write.handle);
+        if (param->write.handle == cccd_handle_ && param->write.status == ESP_GATT_OK) {
+          ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", param->write.handle);
+          notify_enabled_ = true;
+          // Kick the first HELLO now that CCCD is enabled
+          wants_handshake_ = true;
+        } else {
+          ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", param->write.handle, (int) param->write.status);
+        }
         break;
       }
 
@@ -118,7 +125,9 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
       case ESP_GATTC_DISCONNECT_EVT: {
         connected_flag_ = false;
+        notify_enabled_ = false;
         if (connected_) connected_->publish_state(false);
+        // On remote drop (0x13), try again next time we connect.
         break;
       }
 
@@ -148,35 +157,40 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
                                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
   }
 
-  // Build & write HELLO (16 bytes): [A5 E5][00 0C][payload(10)][CRC16(payload) LE]
+  // Build & write HELLO (18 bytes total):
+  //   Header [A5 E5] + Length [00 0C] + Payload(12) + CRC16(payload) LE
   void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id,
                    bool /*prefer_write_no_rsp*/, const char *label) {
     if (!write_handle_ || gattc_if == ESP_GATT_IF_NONE) return;
 
-    uint8_t payload[10];
+    // 12-byte payload: version markers + 10 random bytes
+    uint8_t payload[12];
     payload[0] = 0x03;
     payload[1] = 0x04;
     uint32_t r1 = esp_random();
     uint32_t r2 = esp_random();
-    payload[2] = (uint8_t)(r1 & 0xFF);
-    payload[3] = (uint8_t)((r1 >> 8) & 0xFF);
-    payload[4] = (uint8_t)((r1 >> 16) & 0xFF);
-    payload[5] = (uint8_t)((r1 >> 24) & 0xFF);
-    payload[6] = (uint8_t)(r2 & 0xFF);
-    payload[7] = (uint8_t)((r2 >> 8) & 0xFF);
-    payload[8] = (uint8_t)((r2 >> 16) & 0xFF);
-    payload[9] = (uint8_t)((r2 >> 24) & 0xFF);
+    uint32_t r3 = esp_random();
+    payload[2]  = (uint8_t)(r1 & 0xFF);
+    payload[3]  = (uint8_t)((r1 >> 8) & 0xFF);
+    payload[4]  = (uint8_t)((r1 >> 16) & 0xFF);
+    payload[5]  = (uint8_t)((r1 >> 24) & 0xFF);
+    payload[6]  = (uint8_t)(r2 & 0xFF);
+    payload[7]  = (uint8_t)((r2 >> 8) & 0xFF);
+    payload[8]  = (uint8_t)((r2 >> 16) & 0xFF);
+    payload[9]  = (uint8_t)((r2 >> 24) & 0xFF);
+    payload[10] = (uint8_t)(r3 & 0xFF);
+    payload[11] = (uint8_t)((r3 >> 8) & 0xFF);
 
     const uint16_t crc = crc_xmodem_(payload, sizeof(payload));
 
-    uint8_t msg[16];
+    uint8_t msg[18];
     msg[0] = 0xA5; msg[1] = 0xE5;
-    msg[2] = 0x00; msg[3] = 0x0C;
+    msg[2] = 0x00; msg[3] = 0x0C;  // length = 12 (payload only)
     std::memcpy(&msg[4], payload, sizeof(payload));
-    msg[14] = (uint8_t)(crc & 0xFF);
-    msg[15] = (uint8_t)((crc >> 8) & 0xFF);
+    msg[16] = (uint8_t)(crc & 0xFF);
+    msg[17] = (uint8_t)((crc >> 8) & 0xFF);
 
-    ESP_LOGD(TAG, "[%s] HELLO v1 to handle 0x%04X (16 bytes)", label ? label : "?", write_handle_);
+    ESP_LOGD(TAG, "[%s] HELLO v0 to handle 0x%04X (18 bytes)", label ? label : "?", write_handle_);
 
     esp_err_t err = esp_ble_gattc_write_char(
         gattc_if, conn_id, write_handle_, sizeof(msg), msg,
@@ -190,7 +204,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     wants_handshake_ = false;
   }
 
-  // Handles for this lock (as seen in your logs)
+  // Handles (from your discovery)
   void resolve_handles_() {
     write_handle_  = 0x0009;
     notify_handle_ = 0x000B;
@@ -209,6 +223,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   uint16_t cccd_handle_{0};
 
   bool connected_flag_{false};
+  bool notify_enabled_{false};
   bool key_received_seen_{false};
   bool prefer_write_no_rsp_{false};
 
