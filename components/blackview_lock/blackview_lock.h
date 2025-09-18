@@ -43,6 +43,31 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     READY
   };
 
+  // ----- Setters for YAML configuration (Restored for compatibility) -----
+  void set_session_key_text_sensor(text_sensor::TextSensor *t) { this->session_key_text_ = t; }
+  void set_last_notify_text_sensor(text_sensor::TextSensor *t) { this->last_notify_text_ = t; }
+  void set_key_received_binary_sensor(binary_sensor::BinarySensor *b) { this->key_received_ = b; }
+  void set_connected_binary_sensor(binary_sensor::BinarySensor *b) { this->connected_bin_ = b; }
+  void set_notify_count_sensor(sensor::Sensor *s) { this->notify_count_ = s; }
+  // Deprecated setters, kept for compile compatibility
+  void set_prefer_write_no_rsp(bool v) {}
+  void set_write_uuid(const std::string &u) {}
+  void set_notify_uuid(const std::string &u) {}
+
+  // ----- Public actions for YAML buttons (Restored for compatibility) -----
+  void request_handshake() {
+    ESP_LOGD(TAG, "Manual handshake requested. Starting process...");
+    if (this->parent() && this->parent()->connected) {
+      this->send_get_random_code_();
+    } else {
+      ESP_LOGW(TAG, "Cannot start handshake: not connected.");
+    }
+  }
+  void request_handshake_mode(int mode) {
+    ESP_LOGD(TAG, "Manual handshake (mode %d) requested. Starting process...", mode);
+    this->request_handshake();
+  }
+  
   void setup() override {
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND;
     uint8_t key_size = 16;
@@ -96,32 +121,26 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     ESP_LOGI(TAG, "Resolved handles: write=0x%04X, notify=0x%04X", this->write_handle_, this->notify_handle_);
   }
   
-  // STEP 1 of handshake
   void send_get_random_code_() {
     ESP_LOGI(TAG, "Handshake Step 1: Sending GetRandomCode (32771)...");
     this->state_ = LockState::AWAITING_RANDOM_CODE;
-    // The app sends a dummy random code of 1, so we do the same.
     this->send_command_(32771, 1, {}); 
   }
 
-  // STEP 2 of handshake
   void handle_notification_(const uint8_t *data, uint16_t len) {
-    if (len < 6) { // Min length: A5 E5 [2 byte payload] [2 byte CRC]
+    ESP_LOGD(TAG, "NOTIFY received: %s", format_hex_pretty(data, len).c_str());
+    if (this->last_notify_text_ != nullptr) this->last_notify_text_->publish_state(format_hex_pretty(data, len));
+
+    if (len < 6) {
         ESP_LOGW(TAG, "Received runt packet of length %d", len);
         return;
     }
     
-    // For now, we assume the response is not encrypted
-    ESP_LOGD(TAG, "NOTIFY received: %s", format_hex_pretty(data, len).c_str());
-
-    // Skip sync word (A5 E5) and extract payload
     const uint8_t* payload = data + 2;
-    size_t payload_len = len - 4; // Subtract sync word and CRC
+    size_t payload_len = len - 4;
     
-    // TODO: Verify CRC
-
     if (this->state_ == LockState::AWAITING_RANDOM_CODE) {
-        if (payload_len >= 8) { // Expecting at least an 8-byte random code
+        if (payload_len >= 8) {
             uint64_t random_code = 0;
             memcpy(&random_code, payload, 8);
             ESP_LOGI(TAG, "Handshake Step 2: Received random code: 0x%016llX", random_code);
@@ -134,10 +153,10 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         std::string key_hex = format_hex_pretty(payload, payload_len);
         ESP_LOGI(TAG, "Handshake Step 4: SUCCESS! Received Session Key: %s", key_hex.c_str());
         if(this->session_key_text_ != nullptr) this->session_key_text_->publish_state(key_hex);
+        if(this->key_received_ != nullptr) this->key_received_->publish_state(true);
     }
   }
 
-  // STEP 3 of handshake
   void send_get_session_key_(uint64_t random_code) {
     ESP_LOGI(TAG, "Handshake Step 3: Sending GetSessionKey (36960) with received random code...");
     this->state_ = LockState::AWAITING_SESSION_KEY;
@@ -146,12 +165,11 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void send_command_(uint16_t cmd_id, uint64_t random_code, const std::vector<uint8_t>& data) {
     auto *cli = this->parent();
-    if (cli == nullptr || !cli->is_connected()) {
+    if (cli == nullptr || !cli->connected) { // Corrected: is_connected -> connected
       ESP_LOGW(TAG, "Cannot send command: not connected.");
       return;
     }
 
-    // Build inner payload: [Random Code (8 bytes)] + [Command ID (2 bytes)] + [Data Length (2 bytes)] + [Data]
     std::vector<uint8_t> payload;
     payload.resize(12 + data.size());
     memcpy(payload.data(), &random_code, 8);
@@ -164,12 +182,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       memcpy(payload.data() + 12, data.data(), data_len);
     }
     
-    // NOTE: VLinkData180 may perform AES encryption on this payload here
-
-    // Calculate CRC on the inner payload
     uint16_t crc = crc16_xmodem(payload.data(), payload.size());
 
-    // Build final packet: [Sync Word (2 bytes)] + [Payload] + [CRC (2 bytes)]
     std::vector<uint8_t> packet;
     packet.push_back(0xA5);
     packet.push_back(0xE5);
@@ -178,7 +192,14 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     packet.push_back((crc >> 8) & 0xFF);
 
     ESP_LOGD(TAG, "Writing command packet: %s", format_hex_pretty(packet.data(), packet.size()).c_str());
-    cli->write_characteristic(this->write_handle_, packet.data(), packet.size(), false);
+    
+    // Corrected: write_characteristic -> esp_ble_gattc_write_char
+    esp_err_t r = esp_ble_gattc_write_char(cli->get_gattc_if(), cli->get_conn_id(), this->write_handle_,
+                                           packet.size(), packet.data(),
+                                           ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NO_MITM);
+    if (r != ESP_OK) {
+        ESP_LOGW(TAG, "esp_ble_gattc_write_char error, status=%d", r);
+    }
   }
 
   // ----- Members -----
@@ -186,8 +207,12 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   uint16_t notify_handle_{0};
   LockState state_{LockState::IDLE};
   
+  // Member variables for sensors
   text_sensor::TextSensor *session_key_text_{nullptr};
+  text_sensor::TextSensor *last_notify_text_{nullptr};
+  binary_sensor::BinarySensor *key_received_{nullptr};
   binary_sensor::BinarySensor *connected_bin_{nullptr};
+  sensor::Sensor *notify_count_{nullptr};
 };
 
 }  // namespace blackview_lock
