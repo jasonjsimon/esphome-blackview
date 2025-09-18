@@ -17,6 +17,17 @@ namespace blackview_lock {
 
 static const char *const TAG = "blackview_lock";
 
+class BlackviewLock; // Forward declaration for the static instance pointer
+
+static BlackviewLock *instance = nullptr; // Global static pointer to the single instance
+
+// Static C-style callback that routes the event to our C++ class member
+static void gap_event_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  if (instance != nullptr) {
+    instance->gap_event_handler(event, param);
+  }
+}
+
 /**
  * Blackview SE-series lock GATT client node.
  * Flow: CONNECT → DISCOVERY → register_for_notify (stack writes CCCD) → delay → HELLO → expect NOTIFY.
@@ -50,7 +61,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   // ----- Component lifecycle -----
   void setup() override {
-    this->parent()->register_gap_event_handler(this, &BlackviewLock::gap_event_handler);
+    instance = this; // Set the global instance pointer
+    esp_ble_gap_register_callback(gap_event_callback); // Register the global callback
     
     esp_ble_auth_req_t auth_req = (esp_ble_auth_req_t)(ESP_LE_AUTH_BOND | ESP_LE_AUTH_REQ_SC_ONLY);
     uint8_t key_size = 16;
@@ -105,20 +117,20 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     switch (event) {
       case ESP_GAP_BLE_AUTH_CMPL_EVT: {
-        if (param->ble_security.auth_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+        if (param->auth_cmpl.status == ESP_BT_STATUS_SUCCESS) {
           ESP_LOGI(TAG, "GAP AUTH OK: address=%02x:%02x:%02x:%02x:%02x:%02x",
-                   param->ble_security.auth_cmpl.bd_addr[0], param->ble_security.auth_cmpl.bd_addr[1],
-                   param->ble_security.auth_cmpl.bd_addr[2], param->ble_security.auth_cmpl.bd_addr[3],
-                   param->ble_security.auth_cmpl.bd_addr[4], param->ble_security.auth_cmpl.bd_addr[5]);
+                   param->auth_cmpl.bd_addr[0], param->auth_cmpl.bd_addr[1],
+                   param->auth_cmpl.bd_addr[2], param->auth_cmpl.bd_addr[3],
+                   param->auth_cmpl.bd_addr[4], param->auth_cmpl.bd_addr[5]);
         } else {
-          ESP_LOGW(TAG, "GAP AUTH FAILED: status=0x%x", param->ble_security.auth_cmpl.status);
+          ESP_LOGW(TAG, "GAP AUTH FAILED: status=0x%x", param->auth_cmpl.status);
         }
         break;
       }
       case ESP_GAP_BLE_SEC_REQ_EVT:
         ESP_LOGI(TAG, "GAP SECURITY REQUEST RECEIVED");
         // Automatically accept the security request
-        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+        esp_ble_gap_security_rsp(param->sec_req.bd_addr, true);
         break;
       default:
         break;
