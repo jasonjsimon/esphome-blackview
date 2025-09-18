@@ -5,6 +5,7 @@
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#include "esphome/components/sensor/sensor.h"
 
 #include <esp_gattc_api.h>
 #include <esp_gap_ble_api.h>
@@ -42,17 +43,38 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     READY
   };
 
+  // ----- Setters for YAML configuration (Restored for compatibility) -----
   void set_session_key_text_sensor(text_sensor::TextSensor *t) { this->session_key_text_ = t; }
   void set_connected_binary_sensor(binary_sensor::BinarySensor *b) { this->connected_bin_ = b; }
+  // Stubs for deprecated sensors to prevent compile errors
+  void set_last_notify_text_sensor(text_sensor::TextSensor *t) {}
+  void set_key_received_binary_sensor(binary_sensor::BinarySensor *b) {}
+  void set_notify_count_sensor(sensor::Sensor *s) {}
+  // Stubs for deprecated config options
+  void set_prefer_write_no_rsp(bool v) {}
+  void set_write_uuid(const std::string &u) {}
+  void set_notify_uuid(const std::string &u) {}
 
+  // ----- Public actions for YAML buttons (Restored for compatibility) -----
+  void request_handshake() {
+    ESP_LOGD(TAG, "Manual handshake requested. Starting process...");
+    if (this->parent() && this->parent()->connected()) {
+      this->send_get_random_code_();
+    } else {
+      ESP_LOGW(TAG, "Cannot start handshake: not connected.");
+    }
+  }
+  void request_handshake_mode(int mode) {
+    ESP_LOGD(TAG, "Manual handshake (mode %d) requested. Starting process...", mode);
+    this->request_handshake();
+  }
+  
   void setup() override {
-    // Standard legacy bonding is sufficient
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND;
     uint8_t key_size = 16;
     esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
     uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
     uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-
     esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
     esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
     esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
@@ -98,7 +120,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   void send_get_random_code_() {
     ESP_LOGI(TAG, "Handshake Step 1: Sending GetRandomCode (32771)...");
     this->state_ = LockState::AWAITING_RANDOM_CODE;
-    this->send_command_(32771, 1, {}); // Using a dummy random code of 1
+    this->send_command_(32771, 1, {});
   }
 
   void send_get_session_key_(uint32_t random_code) {
@@ -116,21 +138,15 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     }
 
     const uint8_t* payload = data + 2;
-    size_t payload_len = len - 4;
-
-    // TODO: Verify CRC
-
     if (this->state_ == LockState::AWAITING_RANDOM_CODE) {
-      // Expecting response to GetRandomCode. Payload should contain the real random code.
       uint32_t random_code = 0;
-      memcpy(&random_code, payload + 4, 4); // The random code is 4 bytes in, after len/dst/src
+      memcpy(&random_code, payload + 4, 4);
       ESP_LOGI(TAG, "Handshake Step 2: Received random code: 0x%08X", random_code);
       this->send_get_session_key_(random_code);
     } else if (this->state_ == LockState::AWAITING_SESSION_KEY) {
       this->state_ = LockState::READY;
-      // Expecting response to GetSessionKey. The inner payload's data is the session key.
       const uint8_t* inner_payload = payload + 8;
-      size_t inner_payload_len = payload_len - 8;
+      size_t inner_payload_len = (len - 4) - 8;
       std::string key_hex = format_hex_pretty(inner_payload, inner_payload_len);
       ESP_LOGI(TAG, "Handshake Step 4: SUCCESS! Received Session Key: %s", key_hex.c_str());
       if(this->session_key_text_ != nullptr) this->session_key_text_->publish_state(key_hex);
@@ -144,7 +160,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       return;
     }
     
-    // Inner Payload: [Cmd ID (2)] + [Data Len (2)] + [Data]
     std::vector<uint8_t> inner_payload;
     inner_payload.push_back(cmd_id & 0xFF);
     inner_payload.push_back((cmd_id >> 8) & 0xFF);
@@ -153,13 +168,12 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     inner_payload.push_back((data_len >> 8) & 0xFF);
     if(data_len > 0) inner_payload.insert(inner_payload.end(), data.begin(), data.end());
 
-    // Main Payload: [Total Len (2)] + [Dst (1)] + [Src (1)] + [Random (4)] + [Inner Payload]
     std::vector<uint8_t> payload;
     uint16_t total_len = 8 + inner_payload.size();
     payload.push_back(total_len & 0xFF);
     payload.push_back((total_len >> 8) & 0xFF);
-    payload.push_back(0x03); // Dst Addr
-    payload.push_back(0x04); // Src Addr
+    payload.push_back(0x03);
+    payload.push_back(0x04);
     payload.push_back(random_code & 0xFF);
     payload.push_back((random_code >> 8) & 0xFF);
     payload.push_back((random_code >> 16) & 0xFF);
@@ -168,7 +182,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
     uint16_t crc = crc16_xmodem(payload.data(), payload.size());
 
-    // Final Packet: [Sync (2)] + [Payload] + [CRC (2)]
     std::vector<uint8_t> packet;
     packet.push_back(0xA5);
     packet.push_back(0xE5);
@@ -192,7 +205,10 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   LockState state_{LockState::IDLE};
   
   text_sensor::TextSensor *session_key_text_{nullptr};
+  text_sensor::TextSensor *last_notify_text_{nullptr};
+  binary_sensor::BinarySensor *key_received_{nullptr};
   binary_sensor::BinarySensor *connected_bin_{nullptr};
+  sensor::Sensor *notify_count_{nullptr};
 };
 
 }  // namespace blackview_lock
