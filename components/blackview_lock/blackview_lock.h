@@ -91,15 +91,16 @@ void setup() override {
       hello_retry_due_ms_ = now + hello_retry_interval_ms_;
     }
 
+    // In the loop() function, around line 94
     if (hello_retry_due_ms_ != 0 && now >= hello_retry_due_ms_) {
-      if (hello_attempts_ >= hello_attempts_max_) {
-        ESP_LOGW(TAG, "No notify after %u HELLO attempts; pausing until next reconnect.", hello_attempts_);
-        hello_retry_due_ms_ = 0;
-      } else {
-        current_hello_version_ ^= 1;  // alternate v1/v0
-        send_hello_(current_hello_version_);
-        hello_retry_due_ms_ = now + hello_retry_interval_ms_;
-      }
+     if (hello_attempts_ >= hello_attempts_max_) {
+      ESP_LOGW(TAG, "No notify after %u HELLO attempts; pausing until next reconnect.", hello_attempts_);
+      hello_retry_due_ms_ = 0;
+     } else {
+       // No more version alternating, just retry the same one
+       send_hello_();
+       hello_retry_due_ms_ = now + hello_retry_interval_ms_;
+     }
     }
   }
 
@@ -285,7 +286,7 @@ void send_hello_() {
   uint8_t current_hello_version_{1};
   uint8_t hello_attempts_{0};
   uint8_t hello_attempts_max_{10};
-  const uint32_t post_cccd_delay_ms_{1500};      // was 800
+  const uint32_t post_cccd_delay_ms_{3000};      // was 1500
   const uint32_t hello_retry_interval_ms_{1500}; // was 1000
 
   // Optional encryption nudge
@@ -310,5 +311,6 @@ void send_hello_() {
 
 }  // namespace blackview_lock
 }  // namespace esphome
+
 
 
