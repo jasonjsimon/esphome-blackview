@@ -16,7 +16,7 @@ namespace blackview_lock {
 
 static const char *const TAG = "blackview_lock";
 
-// Normalize IDF enum spelling differences once, then only use *_CMPL_* below.
+// Normalize IDF enum spelling differences.
 #ifndef ESP_GATTC_SEARCH_CMPL_EVT
   #ifdef ESP_GATTC_SEARCH_CMP_EVT
     #define ESP_GATTC_SEARCH_CMPL_EVT ESP_GATTC_SEARCH_CMP_EVT
@@ -25,24 +25,21 @@ static const char *const TAG = "blackview_lock";
 
 class BlackviewLock : public Component, public ble_client::BLEClientNode {
  public:
-  // Wiring to HA entities
+  // Wire-up to HA entities
   void set_session_key_text_sensor(text_sensor::TextSensor *t) { session_key_text_ = t; }
   void set_last_notify_text_sensor(text_sensor::TextSensor *t) { last_notify_text_ = t; }
   void set_key_received_binary_sensor(binary_sensor::BinarySensor *b) { key_received_ = b; }
   void set_connected_binary_sensor(binary_sensor::BinarySensor *b) { connected_ = b; }
   void set_notify_count_sensor(sensor::Sensor *s) { notify_count_ = s; }
 
-  // Back-compat no-ops so older YAML/Main still compile
+  // Back-compat no-ops so older YAML/main compile cleanly
   void set_prefer_write_no_rsp(bool) {}
   void set_write_uuid(const std::string &) {}
   void set_notify_uuid(const std::string &) {}
 
   // Manual triggers from template buttons
   void request_handshake() { wants_handshake_ = true; }
-  void request_handshake_mode(int mode) {
-    handshake_mode_ = mode;
-    wants_handshake_ = true;
-  }
+  void request_handshake_mode(int mode) { handshake_mode_ = mode; wants_handshake_ = true; }
 
   void dump_config() override {
     ESP_LOGCONFIG(TAG, "Blackview Lock:");
@@ -52,8 +49,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   }
 
  protected:
-  // Intercept GATT Client events
-  bool gattc_event_handler(esp_gattc_cb_event_t event,
+  // Must be 'void' to match BLEClientNode
+  void gattc_event_handler(esp_gattc_cb_event_t event,
                            esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override {
     switch (event) {
@@ -61,7 +58,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         if (param->open.status == ESP_GATT_OK) {
           if (connected_) connected_->publish_state(true);
           ESP_LOGI(TAG, "Connected! Sending HELLO immediately...");
-          // try an early HELLO; discovery follows right away
           this->send_hello_(gattc_if, param->open.conn_id, /*no_rsp*/ true, "fallback");
         } else {
           ESP_LOGW(TAG, "OPEN_EVT status=%d", param->open.status);
@@ -86,7 +82,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       }
 
       case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
-        // Descriptor write confirmation follows as WRITE_DESCR_EVT
+        // Descriptor write confirmation will arrive as WRITE_DESCR_EVT
         break;
       }
 
@@ -94,7 +90,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         notify_counter_++;
         if (notify_count_) notify_count_->publish_state(notify_counter_);
 
-        // Build hex for debugging / reverse-engineering
+        // Hex dump for debugging
         std::string hex;
         hex.reserve(param->notify.value_len * 2);
         for (int i = 0; i < param->notify.value_len; i++) {
@@ -104,7 +100,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         }
         if (last_notify_text_) last_notify_text_->publish_state(hex);
 
-        // Simple heuristic: mark "key received" once we see any plausible payload
+        // Mark key-received on first plausible payload
         if (param->notify.value_len >= 8 && key_received_ && !key_received_seen_) {
           key_received_->publish_state(true);
           key_received_seen_ = true;
@@ -133,15 +129,15 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       default:
         break;
     }
-    // Let the base class continue normal processing
-    return false;
+    // no return — signature is void
   }
 
   void loop() override {
     const uint32_t now = millis();
 
-    // Periodic HELLO while connected (keeps the session alive while we reverse)
-    if (this->is_connected() && (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
+    // Only send periodic HELLOs when the BLE client is connected
+    if (this->parent() && this->parent()->is_connected()
+        && (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
       this->send_hello_(this->parent()->get_gattc_if(),
                         this->parent()->get_conn_id(),
                         /*no_rsp*/ true,
@@ -151,7 +147,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
     }
   }
 
-  // For this device family (per btsnoop), the ATT handles are fixed:
+  // For this device family (from btsnoop):
   //   Service 0x1910:
   //     Char 0x2B11 (Write/WriteNR)  -> handle 0x0009
   //     Char 0x2B10 (Notify)         -> handle 0x000B
@@ -172,9 +168,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
                                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
   }
 
-  // Minimal "HELLO v0" payload (18 bytes): 16 bytes + CRC-XMODEM LE (2 bytes).
-  // We’ll keep payload zeros for now; the lock is answering even with this,
-  // which is useful while we decode the proper session-init later.
+  // Minimal probe/hello payload (18 bytes: 16 + CRC-XMODEM LE 2B)
   void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id, bool no_rsp, const char *label) {
     if (!write_handle_) return;
 
@@ -220,7 +214,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   uint32_t hello_interval_ms_{8000};
   bool wants_handshake_{false};
   bool key_received_seen_{false};
-  int handshake_mode_{0};
+  int handshake_mode_[1]; // currently unused, reserved
 };
 
 }  // namespace blackview_lock
