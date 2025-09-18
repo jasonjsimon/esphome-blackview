@@ -39,7 +39,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   void set_notify_count_sensor(sensor::Sensor *s) { notify_count_ = s; }
 
   // No-ops to satisfy generated main.cpp without touching YAML
-  void set_prefer_write_no_rsp(bool v) { prefer_write_no_rsp_ = v; }
+  void set_prefer_write_no_rsp(bool /*v*/) {}
   void set_write_uuid(const char * /*uuid*/) {}
   void set_notify_uuid(const char * /*uuid*/) {}
 
@@ -57,11 +57,13 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   void loop() override {
     const uint32_t now = millis();
-    if (connected_flag_ && notify_enabled_ &&
+    // Only send after CCCD is enabled, and give the server ~400ms to settle.
+    const bool post_cccd_settle = (cccd_enabled_ms_ == 0) || (now - cccd_enabled_ms_ >= 400);
+    if (connected_flag_ && notify_enabled_ && post_cccd_settle &&
         (wants_handshake_ || (now - last_hello_ms_ >= hello_interval_ms_))) {
       auto *p = this->parent();
       if (p != nullptr) {
-        send_hello_(p->get_gattc_if(), p->get_conn_id(), /*prefer_write_no_rsp=*/prefer_write_no_rsp_, "auto");
+        send_hello_(p->get_gattc_if(), p->get_conn_id(), "auto");
       }
     }
   }
@@ -84,7 +86,6 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         resolve_handles_();
         ESP_LOGI(TAG, "Resolved: write_handle=0x%04X, notify_handle=0x%04X", write_handle_, notify_handle_);
         ESP_LOGI(TAG, "CCCD handle 0x%04X; enabling notifications…", cccd_handle_);
-        // Enable notifications first; send HELLO only after WRITE_DESCR_EVT ack.
         enable_notify_(gattc_if, param->search_cmpl.conn_id);
         break;
       }
@@ -93,8 +94,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
         if (param->write.handle == cccd_handle_ && param->write.status == ESP_GATT_OK) {
           ESP_LOGD(TAG, "Descriptor write OK (handle 0x%04X)", param->write.handle);
           notify_enabled_ = true;
-          // Kick the first HELLO now that CCCD is enabled
-          wants_handshake_ = true;
+          cccd_enabled_ms_ = millis();  // start settle timer
+          wants_handshake_ = true;      // arm first HELLO (loop will gate by settle delay)
         } else {
           ESP_LOGW(TAG, "Descriptor write failed (handle 0x%04X, status %d)", param->write.handle, (int) param->write.status);
         }
@@ -126,8 +127,8 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
       case ESP_GATTC_DISCONNECT_EVT: {
         connected_flag_ = false;
         notify_enabled_ = false;
+        cccd_enabled_ms_ = 0;
         if (connected_) connected_->publish_state(false);
-        // On remote drop (0x13), try again next time we connect.
         break;
       }
 
@@ -159,8 +160,7 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
   // Build & write HELLO (18 bytes total):
   //   Header [A5 E5] + Length [00 0C] + Payload(12) + CRC16(payload) LE
-  void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id,
-                   bool /*prefer_write_no_rsp*/, const char *label) {
+  void send_hello_(esp_gatt_if_t gattc_if, uint16_t conn_id, const char *label) {
     if (!write_handle_ || gattc_if == ESP_GATT_IF_NONE) return;
 
     // 12-byte payload: version markers + 10 random bytes
@@ -192,9 +192,10 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
 
     ESP_LOGD(TAG, "[%s] HELLO v0 to handle 0x%04X (18 bytes)", label ? label : "?", write_handle_);
 
+    // *** Change: use NO_RSP for HELLO to match some locks' expectations ***
     esp_err_t err = esp_ble_gattc_write_char(
         gattc_if, conn_id, write_handle_, sizeof(msg), msg,
-        ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+        ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
 
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "HELLO write failed: err=%d", (int) err);
@@ -225,12 +226,12 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   bool connected_flag_{false};
   bool notify_enabled_{false};
   bool key_received_seen_{false};
-  bool prefer_write_no_rsp_{false};
 
   uint32_t notify_counter_{0};
   bool     wants_handshake_{false};
   int      handshake_mode_{0};
   uint32_t last_hello_ms_{0};
+  uint32_t cccd_enabled_ms_{0};
   static constexpr uint32_t hello_interval_ms_{8000};
 };
 
