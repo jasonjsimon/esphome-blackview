@@ -17,20 +17,15 @@ namespace blackview_lock {
 
 static const char *const TAG = "blackview_lock";
 
-class BlackviewLock; // Forward declaration for the static instance pointer
+class BlackviewLock; // Forward declaration
 
-static BlackviewLock *instance = nullptr; // Global static pointer to the single instance
+static BlackviewLock *instance = nullptr; // Global static pointer
 
-// Static C-style callback that routes the event to our C++ class member
-static void gap_event_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-  if (instance != nullptr) {
-    instance->gap_event_handler(event, param);
-  }
-}
+// Forward declaration of the callback function
+static void gap_event_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
 
 /**
  * Blackview SE-series lock GATT client node.
- * Flow: CONNECT → DISCOVERY → register_for_notify (stack writes CCCD) → delay → HELLO → expect NOTIFY.
  */
 class BlackviewLock : public Component, public ble_client::BLEClientNode {
  public:
@@ -343,6 +338,13 @@ class BlackviewLock : public Component, public ble_client::BLEClientNode {
   std::string write_uuid_;
   std::string notify_uuid_;
 };
+
+// Definition of the static callback function, placed after the class is fully defined
+static void gap_event_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  if (instance != nullptr) {
+    instance->gap_event_handler(event, param);
+  }
+}
 
 }  // namespace blackview_lock
 }  // namespace esphome
