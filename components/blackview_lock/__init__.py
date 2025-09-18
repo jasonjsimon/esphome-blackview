@@ -25,25 +25,29 @@ CONF_NOTIFY_COUNT = "notify_count"
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(BlackviewLock),
     cv.GenerateID(CONF_BLE_CLIENT_ID): cv.use_id(ble_client.BLEClient),
+
     cv.Optional(CONF_PREFER_WRITE_NO_RSP, default=False): cv.boolean,
     cv.Optional(CONF_WRITE_UUID, default="00002b11-0000-1000-8000-00805f9b34fb"): cv.uuid,
     cv.Optional(CONF_NOTIFY_UUID, default="00002b10-0000-1000-8000-00805f9b34fb"): cv.uuid,
+
     cv.Optional(CONF_FALLBACK_WRITE_HANDLE): cv.hex_uint16_t,
     cv.Optional(CONF_FALLBACK_NOTIFY_HANDLE): cv.hex_uint16_t,
     cv.Optional(CONF_FALLBACK_CCCD_HANDLE): cv.hex_uint16_t,
 
-    cv.Optional(CONF_SESSION_KEY): text_sensor.TEXT_SENSOR_SCHEMA,
-    cv.Optional(CONF_LAST_NOTIFY): text_sensor.TEXT_SENSOR_SCHEMA,
-    cv.Optional(CONF_KEY_RECEIVED): binary_sensor.BINARY_SENSOR_SCHEMA,
-    cv.Optional(CONF_CONNECTED): binary_sensor.BINARY_SENSOR_SCHEMA,
-    cv.Optional(CONF_NOTIFY_COUNT): sensor.SENSOR_SCHEMA,
+    cv.Optional(CONF_SESSION_KEY): text_sensor.text_sensor_schema(),
+    cv.Optional(CONF_LAST_NOTIFY): text_sensor.text_sensor_schema(),
+    cv.Optional(CONF_KEY_RECEIVED): binary_sensor.binary_sensor_schema(),
+    cv.Optional(CONF_CONNECTED): binary_sensor.binary_sensor_schema(),
+    cv.Optional(CONF_NOTIFY_COUNT): sensor.sensor_schema(),
 }).extend(cv.COMPONENT_SCHEMA)
 
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
-    await ble_client.register_ble_node(var, config[CONF_BLE_CLIENT_ID])
     await cg.register_component(var, config)
+
+    # IMPORTANT: ble_client expects the full config dict here
+    await ble_client.register_ble_node(var, config)
 
     cg.add(var.set_prefer_write_no_rsp(config[CONF_PREFER_WRITE_NO_RSP]))
     cg.add(var.set_write_uuid(str(config[CONF_WRITE_UUID]).lower()))
@@ -57,21 +61,21 @@ async def to_code(config):
         cg.add(var.set_fallback_cccd_handle(config[CONF_FALLBACK_CCCD_HANDLE]))
 
     if CONF_SESSION_KEY in config:
-        sens = await text_sensor.new_text_sensor(config[CONF_SESSION_KEY])
-        cg.add(var.set_session_key_text_sensor(sens))
+        t1 = await text_sensor.new_text_sensor(config[CONF_SESSION_KEY])
+        cg.add(var.set_session_key_text_sensor(t1))
 
     if CONF_LAST_NOTIFY in config:
-        sens2 = await text_sensor.new_text_sensor(config[CONF_LAST_NOTIFY])
-        cg.add(var.set_last_notify_text_sensor(sens2))
+        t2 = await text_sensor.new_text_sensor(config[CONF_LAST_NOTIFY])
+        cg.add(var.set_last_notify_text_sensor(t2))
 
     if CONF_KEY_RECEIVED in config:
-        bin1 = await binary_sensor.new_binary_sensor(config[CONF_KEY_RECEIVED])
-        cg.add(var.set_key_received_binary_sensor(bin1))
+        b1 = await binary_sensor.new_binary_sensor(config[CONF_KEY_RECEIVED])
+        cg.add(var.set_key_received_binary_sensor(b1))
 
     if CONF_CONNECTED in config:
-        bin2 = await binary_sensor.new_binary_sensor(config[CONF_CONNECTED])
-        cg.add(var.set_connected_binary_sensor(bin2))
+        b2 = await binary_sensor.new_binary_sensor(config[CONF_CONNECTED])
+        cg.add(var.set_connected_binary_sensor(b2))
 
     if CONF_NOTIFY_COUNT in config:
-        sen = await sensor.new_sensor(config[CONF_NOTIFY_COUNT])
-        cg.add(var.set_notify_count_sensor(sen))
+        s1 = await sensor.new_sensor(config[CONF_NOTIFY_COUNT])
+        cg.add(var.set_notify_count_sensor(s1))
